@@ -16,6 +16,18 @@ const BUFFER_SIZE = 4096
  */
 const EXTRA_LEAD_SEC = 0.05
 
+/**
+ * 화면용 재생 위치 평활. 오디오 콜백(약 93ms마다)의 앵커는 SoundTouch가 입력을 고르지 않은
+ * 덩어리로 읽어 가서 콜백마다 앞뒤로 수십~수백 ms 튄다. 그대로 그리면 헤드가 초당 10번가량
+ * 움찔거리고 뒤로도 간다. 화면 위치는 흐른 시간만큼 고르게 나아가고, 앵커 쪽으로는
+ * 시정수 SMOOTH_TAU_SEC로 천천히 끌려가게 한다.
+ */
+const SMOOTH_TAU_SEC = 0.5
+/** 보정은 원래 진행량의 ±이 비율까지 — 헤드가 뒤로 가거나 확 튀지 않는다 */
+const MAX_CORRECTION = 0.25
+/** 앵커와 이만큼 넘게 벌어지면 따라가지 않고 바로 맞춘다(예상 못 한 점프 대비) */
+const SNAP_SEC = 0.5
+
 export type EngineEvents = {
   /** 루프가 아닌 상태로 곡 끝에 도달 */
   onEnded?: () => void
@@ -46,6 +58,8 @@ export class AudioEngine {
   private anchorFrame = 0
   /** 정지 중이거나 seek 직후의 위치 */
   private restingFrame = 0
+  /** 화면용 평활 위치와 그 시각(performance.now). seek·재생 시작 때 비운다 */
+  private smooth: { frame: number; at: number } | null = null
 
   private events: EngineEvents = {}
 
@@ -118,6 +132,7 @@ export class AudioEngine {
     this.buffer = null
     this.playing = false
     this.restingFrame = 0
+    this.smooth = null
   }
 
   async dispose() {
@@ -152,6 +167,7 @@ export class AudioEngine {
     }
     this.anchorCtxTime = this.ctx.currentTime
     this.anchorFrame = this.restingFrame
+    this.smooth = null
     this.node.connect(this.gain)
     this.playing = true
   }
@@ -183,6 +199,7 @@ export class AudioEngine {
     this.source.servedFrame = clamped
     this.restingFrame = clamped
     this.anchorFrame = clamped
+    this.smooth = null
     if (this.ctx) this.anchorCtxTime = this.ctx.currentTime
   }
 
@@ -245,9 +262,46 @@ export class AudioEngine {
     return this.source.mapFrame(Math.max(0, Math.min(frame, this.buffer.length)))
   }
 
+  /**
+   * 화면에 그릴 재생 위치. currentFrame()을 그대로 쓰면 떨리므로 평활한다(SMOOTH_TAU_SEC 참고).
+   * 재생 시작 직후에는 파이프라인 지연만큼 앵커가 뒤에 있어서, 헤드는 제자리에서 조금 느리게
+   * 출발해 실제 소리에 맞춰 간다 — 뒤로 튀었다가 출발하지 않는다.
+   */
+  private displayFrame(): number {
+    if (!this.playing || !this.buffer || !this.source) return this.restingFrame
+    const raw = this.currentFrame()
+    const now = performance.now()
+    if (!this.smooth) {
+      this.smooth = { frame: this.restingFrame, at: now }
+      return this.restingFrame
+    }
+
+    const s = this.source
+    const sr = this.buffer.sampleRate
+    const dt = Math.max(0, (now - this.smooth.at) / 1000)
+    const advance = dt * this.tempo * sr
+    const pred = s.mapFrame(Math.min(this.smooth.frame + advance, this.buffer.length))
+
+    // 루프 되감기를 사이에 두고 앵커와 예측이 갈렸으면 구간 길이만큼 접어서 비교한다
+    let err = raw - pred
+    const len = s.loopEndFrame - s.loopStartFrame
+    if (s.loop && len > 0 && Math.abs(err) > len / 2) err -= Math.sign(err) * len
+
+    let frame: number
+    if (Math.abs(err) > SNAP_SEC * sr) {
+      frame = raw
+    } else {
+      const pull = err * (1 - Math.exp(-dt / SMOOTH_TAU_SEC))
+      const limit = advance * MAX_CORRECTION
+      frame = s.mapFrame(Math.min(pred + Math.max(-limit, Math.min(limit, pull)), this.buffer.length))
+    }
+    this.smooth = { frame, at: now }
+    return frame
+  }
+
   getPositionSec(): number {
     if (!this.buffer) return 0
-    return this.currentFrame() / this.buffer.sampleRate
+    return this.displayFrame() / this.buffer.sampleRate
   }
 
   private outputLatency(): number {

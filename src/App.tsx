@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Library } from './components/Library'
 import { Transport } from './components/Transport'
-import { Waveform } from './components/Waveform'
+import { Stage } from './components/Stage'
 import { DrillPanel } from './components/DrillPanel'
 import { RegionList } from './components/RegionList'
 import { usePlayer } from './store/usePlayer'
@@ -63,9 +63,7 @@ export default function App() {
         <Library />
         <main className="player">
           <Transport />
-          <div className="stage">
-            <Waveform />
-          </div>
+          <Stage />
           <DrillPanel />
           <RegionList />
         </main>

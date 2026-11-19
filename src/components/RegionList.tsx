@@ -13,9 +13,11 @@ export function RegionList() {
 
   return (
     <div className="regions">
-      <h3>구간 북마크</h3>
+      <h3>
+        구간 북마크{regions.length > 0 && <span className="count">{regions.length}</span>}
+      </h3>
       {regions.length === 0 ? (
-        <p className="hint">저장한 구간이 없습니다. 파형에서 구간을 잡고 저장하세요.</p>
+        <p className="hint">저장한 구간이 없습니다. 위쪽 시간 눈금을 드래그해 구간을 잡고 저장하세요.</p>
       ) : (
         <ul>
           {regions.map((r) => (
@@ -25,6 +27,7 @@ export function RegionList() {
                 <span className="r-time">
                   {formatTime(r.startSec)} – {formatTime(r.endSec)}
                 </span>
+                <span className="r-len">{(r.endSec - r.startSec).toFixed(1)}초</span>
               </button>
               <button
                 className="icon"

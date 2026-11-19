@@ -275,6 +275,34 @@ async function main() {
   const ctxState = await cdp.eval(`(() => 'ok')()`)
   check('재생 위치가 전진한다', t1 !== t2, `${t1} → ${t2}`, ctxState)
 
+  /* 6-1. 재생 헤드가 떨리지 않고 고르게 움직이는지 — 화면 프레임마다 위치를 재서
+   *       "흐른 시간만큼 나아갔는지"의 오차를 본다. 루프 되감기(큰 역행)는 뺀다 */
+  const motion = JSON.parse(await cdp.eval(`(async () => {
+    const { engine } = await import('/src/audio/engine.ts');
+    const samples = [];
+    await new Promise((done) => {
+      const t0 = performance.now();
+      const tick = (t) => {
+        samples.push([t, engine.getPositionSec()]);
+        if (t - t0 < 2500) requestAnimationFrame(tick); else done();
+      };
+      requestAnimationFrame(tick);
+    });
+    let worst = 0, back = 0, n = 0, sumAbs = 0;
+    for (let i = 1; i < samples.length; i++) {
+      const dt = (samples[i][0] - samples[i - 1][0]) / 1000;
+      const dp = samples[i][1] - samples[i - 1][1];
+      if (dp < -0.5) continue; // 루프 되감기
+      const err = Math.abs(dp - dt);
+      worst = Math.max(worst, err); sumAbs += err; n++;
+      if (dp < -0.0005) back++;
+    }
+    return JSON.stringify({ n, worstMs: worst * 1000, meanMs: (sumAbs / n) * 1000, back });
+  })()`))
+  console.log(`      재생 헤드 프레임당 오차: 평균 ${motion.meanMs.toFixed(1)}ms · 최대 ${motion.worstMs.toFixed(1)}ms · 뒤로 간 프레임 ${motion.back}/${motion.n}`)
+  check('재생 헤드가 떨리지 않고 고르게 움직인다', motion.worstMs < 8 && motion.back === 0,
+    `최대 ${motion.worstMs.toFixed(1)}ms, 역행 ${motion.back}회 (기준: 8ms 미만, 역행 0)`)
+
   /* 7. 루프가 A-B 안에 머무는지 */
   const inLoop = await cdp.eval(`(() => {
     const cur = document.querySelector('.now .cur').textContent;
@@ -401,6 +429,75 @@ async function main() {
   await sleep(200)
   const v4 = await viewOf()
   check('전체 보기 버튼으로 돌아온다', Math.abs(v4.span - 8) < 0.01 && v4.fit === null, `범위 ${v4.start}~${v4.span}초`)
+
+  /* 10. 북마크 세로 목록 · 파형 높이 조절 */
+  // 확대 화면에서 잡아 둔 구간을 두 번째 북마크로 저장
+  await cdp.eval(`(() => {
+    const i = document.querySelector('.save-region input');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(i, '2절 끝');
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`)
+  await sleep(150)
+  await cdp.eval(`document.querySelector('.save-region button').click()`)
+  await sleep(600)
+  const rows = JSON.parse(await cdp.eval(`(() => {
+    const ul = document.querySelector('.regions ul').getBoundingClientRect();
+    return JSON.stringify({ ulW: ul.width, rows: [...document.querySelectorAll('.regions li')].map(li => {
+      const r = li.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width };
+    }) });
+  })()`))
+  const stacked = rows.rows.length === 2 && Math.abs(rows.rows[0].x - rows.rows[1].x) < 1 &&
+    rows.rows[1].y > rows.rows[0].y && rows.rows.every((r) => r.w > rows.ulW - 4)
+  check('북마크가 한 줄에 하나씩 세로로 쌓인다', stacked, rows.rows.map((r) => `y=${Math.round(r.y)} w=${Math.round(r.w)}`).join(' / '))
+
+  // 저장 직후·북마크를 고른 상태에서는 입력창 대신 북마크 이름만 보인다
+  const abState = () => cdp.eval(`JSON.stringify({
+    form: !!document.querySelector('.drill .save-region'),
+    saved: document.querySelector('.drill .ab-saved')?.textContent ?? null,
+  })`).then(JSON.parse)
+  const afterSave = await abState()
+  check('저장한 구간은 입력창 대신 이름으로 보인다', !afterSave.form && afterSave.saved === '2절 끝', JSON.stringify(afterSave))
+  await cdp.eval(`[...document.querySelectorAll('.regions li .go')][0].click()`)
+  await sleep(300)
+  const afterPick = await abState()
+  check('북마크를 고르면 입력창 없이 그 이름이 보인다', !afterPick.form && afterPick.saved === '1절 고음', JSON.stringify(afterPick))
+  // 눈금을 다시 드래그해 새 구간을 잡으면 입력창이 돌아온다
+  const nb = JSON.parse(await cdp.eval(`(() => { const r = document.querySelector('.wave-wrap').getBoundingClientRect();
+    return JSON.stringify({ x: r.left, y: r.top, w: r.width }); })()`))
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: nb.x + nb.w * 0.7, y: nb.y + 12, button: 'left', clickCount: 1, pointerType: 'mouse' })
+  for (let i = 1; i <= 6; i++) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: nb.x + nb.w * (0.7 + 0.02 * i), y: nb.y + 12, button: 'left', pointerType: 'mouse' })
+    await sleep(20)
+  }
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: nb.x + nb.w * 0.82, y: nb.y + 12, button: 'left', clickCount: 1, pointerType: 'mouse' })
+  await sleep(300)
+  const afterDrag = await abState()
+  check('새 구간을 잡으면 입력창이 다시 나온다', afterDrag.form && afterDrag.saved === null, JSON.stringify(afterDrag))
+
+  const stageH = () => cdp.eval(`document.querySelector('.stage').getBoundingClientRect().height`)
+  const h0 = await stageH()
+  const handle = JSON.parse(await cdp.eval(`(() => {
+    const r = document.querySelector('.stage-resize').getBoundingClientRect();
+    return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+  })()`))
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: handle.x, y: handle.y, button: 'left', clickCount: 1, pointerType: 'mouse' })
+  for (let i = 1; i <= 8; i++) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: handle.x, y: handle.y + (80 * i) / 8, button: 'left', pointerType: 'mouse' })
+    await sleep(20)
+  }
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: handle.x, y: handle.y + 80, button: 'left', clickCount: 1, pointerType: 'mouse' })
+  await sleep(300)
+  const h1 = await stageH()
+  check('파형 아래 끝을 끌면 높이가 바뀐다', Math.abs(h1 - h0 - 80) < 2, `${Math.round(h0)}px → ${Math.round(h1)}px (+80 기대)`)
+
+  await cdp.send('Page.captureScreenshot', { format: 'png' })
+    .then((r) => writeFileSync(SHOT.replace(/\.png$/, '-layout.png'), Buffer.from(r.data, 'base64')))
+
+  await cdp.send('Page.navigate', { url: APP })
+  await sleep(3000)
+  const h2 = await stageH()
+  check('파형 높이를 새로고침 후에도 기억한다', Math.abs(h2 - h1) < 2, `${Math.round(h2)}px`)
 
   /* 콘솔 에러 */
   const noise = cdp.consoleErrors.filter((e) => !/DevTools|favicon|AudioContext was not allowed/.test(e))

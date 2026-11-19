@@ -333,7 +333,8 @@ export function Waveform() {
         }
         headWasInViewRef.current = inView
 
-        const px = xOf(pos)
+        // 기기 픽셀에 맞춰 그린다 — 소수 위치면 안티에일리어싱으로 두께가 매 프레임 달라져 반짝인다
+        const px = Math.round(xOf(pos) * dpr) / dpr
         ctx.fillStyle = colors.ink
         ctx.fillRect(px - 1, waveTop, 2, waveH)
 

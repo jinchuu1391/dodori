@@ -14,6 +14,8 @@ export function DrillPanel() {
   const setLoopEnabled = usePlayer((s) => s.setLoopEnabled)
   const saveSelectionAsRegion = usePlayer((s) => s.saveSelectionAsRegion)
   const seek = usePlayer((s) => s.seek)
+  // 저장된 북마크를 그대로 쓰는 중이면 저장할 게 없다. 경계를 끌어 바꾸면 activeRegionId가 비워진다
+  const activeRegion = usePlayer((s) => s.regions.find((r) => r.id === s.activeRegionId) ?? null)
   const [label, setLabel] = useState('')
 
   const len = selection ? selection.endSec - selection.startSec : 0
@@ -35,6 +37,29 @@ export function DrillPanel() {
             <button className="ghost" onClick={() => setSelection(null)}>
               해제
             </button>
+            {activeRegion ? (
+              <span className="ab-saved" title="저장된 구간 북마크">
+                {activeRegion.label}
+              </span>
+            ) : (
+              <form
+                className="save-region"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  if (!selection) return
+                  void saveSelectionAsRegion(label)
+                  setLabel('')
+                }}
+              >
+                <input
+                  type="text"
+                  placeholder="구간 이름 (예: 1절 고음)"
+                  value={label}
+                  onChange={(e) => setLabel(e.target.value)}
+                />
+                <button type="submit">구간 저장</button>
+              </form>
+            )}
           </span>
         ) : (
           <span className="hint">위쪽 시간 눈금을 드래그해 구간을 잡으세요</span>
@@ -52,26 +77,6 @@ export function DrillPanel() {
           <span>구간 반복</span>
         </label>
 
-        <form
-          className="save-region"
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (!selection) return
-            void saveSelectionAsRegion(label)
-            setLabel('')
-          }}
-        >
-          <input
-            type="text"
-            placeholder="구간 이름 (예: 1절 고음)"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            disabled={!selection}
-          />
-          <button type="submit" disabled={!selection}>
-            구간 저장
-          </button>
-        </form>
       </div>
 
       <p className="drill-note">

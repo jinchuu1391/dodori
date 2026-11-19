@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { engine } from '../audio/engine'
-import { computePeaks } from '../audio/peaks'
+import { type WaveLevels, buildWaveLevels } from '../audio/peaks'
 import { sha256Hex } from '../audio/hash'
 import * as repo from '../db/repo'
 import type { Region, Song } from '../types'
@@ -21,7 +21,8 @@ interface PlayerState {
   songs: Song[]
   song: Song | null
   buffer: AudioBuffer | null
-  peaks: number[] | null
+  /** 파형 렌더 데이터 — 곡을 열 때 메모리에서 만든다(저장하지 않음) */
+  levels: WaveLevels | null
   regions: Region[]
   activeRegionId: string | null
 
@@ -73,7 +74,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     songs: [],
     song: null,
     buffer: null,
-    peaks: null,
+    levels: null,
     regions: [],
     activeRegionId: null,
     selection: null,
@@ -124,14 +125,12 @@ export const usePlayer = create<PlayerState>()((set, get) => {
           set({ status: `${file.name} 디코딩 중…` })
           // decodeAudioData는 넘긴 ArrayBuffer를 detach한다. 원본은 File(Blob)로 따로 보관한다
           const buffer = await engine.decode(raw)
-          const peaks = computePeaks(buffer)
 
           const song = await repo.addSong({
             title: file.name.replace(/\.[^.]+$/, ''),
             durationSec: buffer.duration,
             fileHash,
             fileBlob: file,
-            peaks,
           })
           lastId = song.id
         } catch (e) {
@@ -160,15 +159,10 @@ export const usePlayer = create<PlayerState>()((set, get) => {
         engine.setSpeed(get().speed)
         engine.setPitchSemitones(get().pitchSemitones)
 
-        // 캐시된 피크가 있으면 재계산하지 않는다
-        let peaks = song.peaks
-        if (!peaks || peaks.length === 0) {
-          peaks = computePeaks(buffer)
-          await repo.cachePeaks(song.id, peaks)
-        }
+        const levels = buildWaveLevels(buffer)
 
         const regions = await repo.listRegions(song.id)
-        set({ song, buffer, peaks, regions, status: null })
+        set({ song, buffer, levels, regions, status: null })
         localStorage.setItem(LAST_SONG_KEY, song.id)
         await repo.touchSong(song.id)
         syncLoop()
@@ -182,7 +176,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       if (get().song?.id === id) {
         engine.unload()
         localStorage.removeItem(LAST_SONG_KEY)
-        set({ song: null, buffer: null, peaks: null, regions: [], selection: null, isPlaying: false })
+        set({ song: null, buffer: null, levels: null, regions: [], selection: null, isPlaying: false })
       }
       set({ songs: await repo.listSongs() })
       await refreshStorage()

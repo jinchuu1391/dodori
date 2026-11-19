@@ -35,11 +35,6 @@ export async function updateSong(id: string, patch: Partial<Song>): Promise<void
   await db.songs.update(id, { ...patch, updatedAt: now() })
 }
 
-/** 파형 피크 캐시 — 다음에 같은 곡을 열 때 재계산하지 않는다 */
-export async function cachePeaks(id: string, peaks: number[]): Promise<void> {
-  await db.songs.update(id, { peaks })
-}
-
 export async function touchSong(id: string): Promise<void> {
   await db.songs.update(id, { lastPracticedAt: now() })
 }

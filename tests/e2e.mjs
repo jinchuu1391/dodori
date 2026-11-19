@@ -223,12 +223,12 @@ async function main() {
   })()`)
   check('파형 픽셀이 실제로 그려졌다', drawn > 1000, `불투명 픽셀 ${drawn.toLocaleString()}개`)
 
-  /* 4. 드래그로 A-B 구간 선택 */
+  /* 4. 위쪽 시간 눈금을 드래그해 A-B 구간 선택 (파형 영역 드래그는 좌우 이동) */
   const box = JSON.parse(await cdp.eval(`(() => {
     const r = document.querySelector('.wave-wrap').getBoundingClientRect();
     return JSON.stringify({x: r.left, y: r.top, w: r.width, h: r.height});
   })()`))
-  const y = box.y + box.h / 2
+  const y = box.y + 12 // 눈금 띠(26px) 안
   const x1 = box.x + box.w * 0.25
   const x2 = box.x + box.w * 0.6
 
@@ -244,7 +244,7 @@ async function main() {
     chips: [...document.querySelectorAll('.drill .chip')].map(e => e.textContent.trim()),
     len: document.querySelector('.drill .len')?.textContent,
   })`))
-  check('드래그하면 A-B 구간이 잡힌다', sel.chips.length === 2, sel.chips.join(' → '))
+  check('눈금을 드래그하면 A-B 구간이 잡힌다', sel.chips.length === 2, sel.chips.join(' → '))
   // 화면 25%~60% ≈ 8초의 2.0s~4.8s ≈ 2.8초
   const lenNum = parseFloat(sel.len ?? '0')
   check('구간 길이가 드래그 폭과 맞는다', lenNum > 2.4 && lenNum < 3.2, `${sel.len} (기대 ≈2.8초)`)
@@ -299,6 +299,108 @@ async function main() {
   check('새로고침해도 곡이 남는다 (IndexedDB)', persisted.songs === 1, `${persisted.songs}곡`)
   check('마지막 곡을 자동으로 다시 연다', persisted.nowTitle === 'test-tone', persisted.nowTitle)
   check('저장한 구간도 복원된다', persisted.regions.includes('1절 고음'), persisted.regions.join(', '))
+
+  /* 9. 휠 확대/축소 · 좌우 이동 */
+  const wbox = JSON.parse(await cdp.eval(`(() => {
+    const r = document.querySelector('.wave-wrap').getBoundingClientRect();
+    return JSON.stringify({x: r.left, y: r.top, w: r.width, h: r.height});
+  })()`))
+  const viewOf = async () => JSON.parse(await cdp.eval(`(() => {
+    const el = document.querySelector('.wave-wrap');
+    return JSON.stringify({ start: +el.dataset.viewStart, span: +el.dataset.viewSpan,
+      fit: document.querySelector('.wave-fit')?.textContent ?? null });
+  })()`))
+  const wy = wbox.y + wbox.h / 2
+  const v0 = await viewOf()
+  check('처음엔 곡 전체가 보인다', Math.abs(v0.span - 8) < 0.01 && v0.fit === null, `범위 ${v0.start}~${v0.start + v0.span}초`)
+
+  // 화면 75% 지점(=6초)에서 휠을 위로 세 번
+  const ax = wbox.x + wbox.w * 0.75
+  for (let i = 0; i < 3; i++) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: ax, y: wy, deltaX: 0, deltaY: -200 })
+    await sleep(60)
+  }
+  await sleep(200)
+  const v1 = await viewOf()
+  const anchor1 = v1.start + 0.75 * v1.span
+  check('휠을 올리면 확대된다', v1.span < 8 * 0.6 && v1.fit !== null, `보이는 길이 ${v1.span.toFixed(2)}초 · ${v1.fit}`)
+  check('마우스 아래 지점이 제자리에 남는다', Math.abs(anchor1 - 6) < 0.05, `75% 지점 = ${anchor1.toFixed(3)}초 (기대 6초)`)
+
+  const zoomPx = await cdp.eval(`(() => {
+    const c = document.querySelector('.wave-wrap canvas');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++; return n;
+  })()`)
+  check('확대 상태에서도 파형이 그려진다', zoomPx > 1000, `불투명 픽셀 ${zoomPx.toLocaleString()}개`)
+
+  // 확대한 화면에서 눈금을 10%~30% 드래그 → 구간 길이는 보이는 길이의 20%
+  const zx1 = wbox.x + wbox.w * 0.1
+  const zx2 = wbox.x + wbox.w * 0.3
+  const ry = wbox.y + 12
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: zx1, y: ry, button: 'left', clickCount: 1, pointerType: 'mouse' })
+  for (let i = 1; i <= 8; i++) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: zx1 + ((zx2 - zx1) * i) / 8, y: ry, button: 'left', pointerType: 'mouse' })
+    await sleep(20)
+  }
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: zx2, y: ry, button: 'left', clickCount: 1, pointerType: 'mouse' })
+  await sleep(300)
+  const zsel = JSON.parse(await cdp.eval(`JSON.stringify([...document.querySelectorAll('.drill .chip')].map(e => e.textContent.trim()))`))
+  const za = toSec(zsel[0]?.replace('A ', '') ?? '')
+  const zb = toSec(zsel[1]?.replace('B ', '') ?? '')
+  const expA = v1.start + 0.1 * v1.span
+  const expLen = 0.2 * v1.span
+  check('확대한 화면에서 눈금으로 잡은 구간이 화면 좌표와 맞는다',
+    Math.abs(za - expA) < 0.15 && Math.abs(zb - za - expLen) < 0.15,
+    `A=${za} B=${zb} (기대 A≈${expA.toFixed(2)}, 길이≈${expLen.toFixed(2)})`)
+
+  await cdp.send('Page.captureScreenshot', { format: 'png' })
+    .then((r) => writeFileSync(SHOT.replace(/\.png$/, '-zoom.png'), Buffer.from(r.data, 'base64')))
+
+  // 파형 영역을 60% → 40%로 끌기 → 화면이 보이는 길이의 20%만큼 뒤로, 구간은 그대로
+  const px1 = wbox.x + wbox.w * 0.6
+  const px2 = wbox.x + wbox.w * 0.4
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: px1, y: wy, button: 'left', clickCount: 1, pointerType: 'mouse' })
+  for (let i = 1; i <= 8; i++) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: px1 + ((px2 - px1) * i) / 8, y: wy, button: 'left', pointerType: 'mouse' })
+    await sleep(20)
+  }
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: px2, y: wy, button: 'left', clickCount: 1, pointerType: 'mouse' })
+  await sleep(300)
+  const vp = await viewOf()
+  const psel = JSON.parse(await cdp.eval(`JSON.stringify([...document.querySelectorAll('.drill .chip')].map(e => e.textContent.trim()))`))
+  check('파형을 드래그하면 좌우로 이동한다', Math.abs(vp.start - v1.start - 0.2 * v1.span) < 0.02 && Math.abs(vp.span - v1.span) < 0.001,
+    `시작 ${v1.start.toFixed(2)} → ${vp.start.toFixed(2)}초 (기대 +${(0.2 * v1.span).toFixed(2)})`)
+  check('파형 드래그는 구간을 바꾸지 않는다', psel.join() === zsel.join(), psel.join(' → '))
+
+  // 트랙패드 가로 스와이프 → 오른쪽으로 이동, 배율은 그대로
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: ax, y: wy, deltaX: 150, deltaY: 0 })
+  await sleep(200)
+  const v2 = await viewOf()
+  check('가로 스크롤로 좌우 이동한다', v2.start > vp.start + 0.01 && Math.abs(v2.span - v1.span) < 0.001,
+    `시작 ${vp.start.toFixed(2)} → ${v2.start.toFixed(2)}초`)
+
+  // (좌우 이동 때 막대가 흔들리지 않는지는 tests/waveform.test.ts에서 타악기 같은 신호로 본다.
+  //  여기 테스트음은 부드러운 사인파라 흔들림이 드러나지 않는다)
+
+  // 많이 축소하면 곡 전체에서 멈춘다
+  for (let i = 0; i < 6; i++) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: ax, y: wy, deltaX: 0, deltaY: 400 })
+    await sleep(40)
+  }
+  await sleep(200)
+  const v3 = await viewOf()
+  check('축소는 곡 전체에서 멈춘다', Math.abs(v3.span - 8) < 0.01 && v3.start === 0 && v3.fit === null, `범위 ${v3.start}~${v3.span}초`)
+
+  // 다시 확대 후 '전체 보기' 버튼
+  for (let i = 0; i < 2; i++) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: ax, y: wy, deltaX: 0, deltaY: -300 })
+    await sleep(40)
+  }
+  await sleep(200)
+  await cdp.eval(`document.querySelector('.wave-fit')?.click()`)
+  await sleep(200)
+  const v4 = await viewOf()
+  check('전체 보기 버튼으로 돌아온다', Math.abs(v4.span - 8) < 0.01 && v4.fit === null, `범위 ${v4.start}~${v4.span}초`)
 
   /* 콘솔 에러 */
   const noise = cdp.consoleErrors.filter((e) => !/DevTools|favicon|AudioContext was not allowed/.test(e))

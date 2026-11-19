@@ -17,7 +17,7 @@ export interface Song {
   fileBlob?: Blob
   /** M3: Supabase Storage 경로(선택 업로드) */
   remotePath?: string
-  /** 파형 렌더 캐시 — 버킷별 절대 피크(0~1). 동기화하지 않는다 */
+  /** @deprecated 예전 파형 캐시. 이제 곡을 열 때 메모리에서 만들고 이 값은 읽지 않는다 */
   peaks?: number[]
   createdAt: number
   updatedAt: number

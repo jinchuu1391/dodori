@@ -540,3 +540,23 @@ h3 {
     width: auto;
   }
 }
+
+/* 확대 중일 때 파형 오른쪽 위 — 전체 보기로 돌아가기 */
+.wave-fit {
+  position: absolute;
+  top: 32px;
+  right: 8px;
+  z-index: 1;
+  padding: 3px 8px;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--faint);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.wave-fit:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}

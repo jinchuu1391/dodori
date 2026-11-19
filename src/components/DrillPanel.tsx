@@ -37,7 +37,7 @@ export function DrillPanel() {
             </button>
           </span>
         ) : (
-          <span className="hint">파형을 드래그해 구간을 잡으세요</span>
+          <span className="hint">위쪽 시간 눈금을 드래그해 구간을 잡으세요</span>
         )}
       </div>
 

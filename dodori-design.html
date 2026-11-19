@@ -1,0 +1,809 @@
+<title>도돌이 — 설계 문서</title>
+<style>
+  :root {
+    --ground: #F5F7F6;
+    --surface: #FFFFFF;
+    --surface-2: #EEF2F0;
+    --ink: #14181A;
+    --muted: #566360;
+    --faint: #7C8987;
+    --line: #E0E5E2;
+    --accent: #0B7C6E;      /* 파형/기본 — teal */
+    --accent-ink: #0B7C6E;
+    --accent-weak: rgba(11,124,110,.10);
+    --loop: #C0741B;        /* A-B 루프 구간 — amber */
+    --loop-weak: rgba(217,140,52,.16);
+    --good: #2F8F4E;
+    --radius: 10px;
+    --col: 68ch;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Pretendard", "Apple SD Gothic Neo", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0D1113;
+      --surface: #14191B;
+      --surface-2: #1A2124;
+      --ink: #E7ECEA;
+      --muted: #93A29E;
+      --faint: #6E7C79;
+      --line: #232C2E;
+      --accent: #2EC4AC;
+      --accent-ink: #38D0B8;
+      --accent-weak: rgba(46,196,172,.12);
+      --loop: #E5A24A;
+      --loop-weak: rgba(229,162,74,.16);
+      --good: #4FBE72;
+    }
+  }
+  :root[data-theme="light"] {
+    --ground: #F5F7F6; --surface: #FFFFFF; --surface-2: #EEF2F0;
+    --ink: #14181A; --muted: #566360; --faint: #7C8987; --line: #E0E5E2;
+    --accent: #0B7C6E; --accent-ink: #0B7C6E; --accent-weak: rgba(11,124,110,.10);
+    --loop: #C0741B; --loop-weak: rgba(217,140,52,.16); --good: #2F8F4E;
+  }
+  :root[data-theme="dark"] {
+    --ground: #0D1113; --surface: #14191B; --surface-2: #1A2124;
+    --ink: #E7ECEA; --muted: #93A29E; --faint: #6E7C79; --line: #232C2E;
+    --accent: #2EC4AC; --accent-ink: #38D0B8; --accent-weak: rgba(46,196,172,.12);
+    --loop: #E5A24A; --loop-weak: rgba(229,162,74,.16); --good: #4FBE72;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: "kern" 1;
+  }
+  .wrap {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 0 28px 120px;
+  }
+  .col { max-width: var(--col); }
+
+  /* ---------- header ---------- */
+  header.hero {
+    padding: 56px 0 40px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 8px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .72rem;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--faint);
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+  .eyebrow .dot { color: var(--line); }
+  h1 {
+    font-size: clamp(2.4rem, 6vw, 3.4rem);
+    line-height: 1.02;
+    letter-spacing: -.02em;
+    margin: 0 0 6px;
+    text-wrap: balance;
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  h1 .en {
+    font-family: var(--mono);
+    font-size: .34em;
+    letter-spacing: .04em;
+    color: var(--accent-ink);
+    font-weight: 500;
+  }
+  .lede {
+    font-size: 1.18rem;
+    color: var(--muted);
+    max-width: 54ch;
+    margin: 0 0 30px;
+    text-wrap: pretty;
+  }
+
+  /* ---------- waveform motif ---------- */
+  .wave {
+    position: relative;
+    height: 84px;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    padding: 0 2px;
+    overflow: hidden;
+  }
+  .wave .bar {
+    flex: 1 1 0;
+    min-width: 2px;
+    background: var(--accent);
+    border-radius: 2px;
+    opacity: .55;
+  }
+  .wave .loop {
+    position: absolute;
+    top: -6px; bottom: -6px;
+    left: 33%; width: 27%;
+    background: var(--loop-weak);
+    border-left: 2px solid var(--loop);
+    border-right: 2px solid var(--loop);
+    border-radius: 3px;
+    pointer-events: none;
+  }
+  .wave .loop::before,
+  .wave .loop::after {
+    content: "";
+    position: absolute;
+    top: 0; width: 9px; height: 9px;
+    background: var(--loop);
+    border-radius: 2px;
+  }
+  .wave .loop::before { left: -5px; }
+  .wave .loop::after { right: -5px; }
+  .wave .bar.in { opacity: 1; }
+  .wave-cap {
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .1em;
+    color: var(--faint);
+    display: flex;
+    justify-content: space-between;
+    margin-top: 10px;
+  }
+  .wave-cap .a { color: var(--loop); }
+
+  /* ---------- toc ---------- */
+  nav.toc {
+    margin: 44px 0 8px;
+    padding: 20px 22px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+  nav.toc h2 {
+    font-family: var(--mono);
+    font-size: .72rem;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin: 0 0 14px;
+    border: 0;
+    padding: 0;
+  }
+  nav.toc ol {
+    margin: 0; padding: 0;
+    list-style: none;
+    columns: 2;
+    column-gap: 32px;
+  }
+  nav.toc li {
+    display: flex;
+    gap: 10px;
+    padding: 4px 0;
+    break-inside: avoid;
+  }
+  nav.toc .n { font-family: var(--mono); color: var(--accent-ink); font-size: .82rem; }
+  nav.toc a { color: var(--ink); text-decoration: none; }
+  nav.toc a:hover { color: var(--accent-ink); }
+
+  /* ---------- sections ---------- */
+  section { padding-top: 30px; margin-top: 30px; }
+  section > .col > p, section > .col > ul, section > .col > ol { margin-top: 0; }
+  h2.sec {
+    font-size: 1.55rem;
+    letter-spacing: -.01em;
+    margin: 0 0 20px;
+    padding-top: 8px;
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    text-wrap: balance;
+    border-top: 1px solid var(--line);
+  }
+  h2.sec .num {
+    font-family: var(--mono);
+    font-size: .78rem;
+    font-weight: 600;
+    color: var(--loop);
+    letter-spacing: .05em;
+    padding-top: .3em;
+    flex: none;
+  }
+  h3 {
+    font-size: 1.05rem;
+    letter-spacing: -.005em;
+    margin: 30px 0 10px;
+  }
+  p { margin: 0 0 16px; }
+  a { color: var(--accent-ink); }
+  strong { font-weight: 650; }
+  ul, ol { padding-left: 1.25em; margin: 0 0 16px; }
+  li { margin: 5px 0; }
+  li::marker { color: var(--faint); }
+
+  .tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .06em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    background: var(--surface);
+    vertical-align: middle;
+  }
+  .tag.teal { color: var(--accent-ink); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); background: var(--accent-weak); }
+  .tag.amber { color: var(--loop); border-color: color-mix(in srgb, var(--loop) 40%, var(--line)); background: var(--loop-weak); }
+  .tag.done { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--line)); background: color-mix(in srgb, var(--good) 12%, transparent); }
+
+  /* ---------- callout ---------- */
+  .note {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin: 20px 0;
+    font-size: .96rem;
+  }
+  .note .lbl {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    display: block;
+    margin-bottom: 6px;
+  }
+  .note.warn { border-left-color: var(--loop); }
+  .note.warn .lbl { color: var(--loop); }
+
+  /* ---------- tables ---------- */
+  .tbl-scroll { overflow-x: auto; margin: 18px 0; border: 1px solid var(--line); border-radius: var(--radius); }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; min-width: 460px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  thead th {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--faint);
+    background: var(--surface-2);
+    font-weight: 600;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: var(--accent-weak); }
+  td code, td .mono { font-family: var(--mono); font-size: .86em; color: var(--accent-ink); }
+  .num-cell { font-variant-numeric: tabular-nums; }
+
+  /* ---------- code ---------- */
+  pre.code {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: .84rem;
+    line-height: 1.65;
+    margin: 18px 0;
+    color: var(--ink);
+  }
+  pre.code .c { color: var(--faint); font-style: italic; }
+  pre.code .k { color: var(--loop); }
+  pre.code .t { color: var(--accent-ink); }
+  pre.code .s { color: var(--good); }
+
+  /* ---------- diagram ---------- */
+  .diagram {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin: 18px 0;
+    overflow-x: auto;
+  }
+  .diagram pre.mermaid { margin: 0; text-align: center; min-width: 480px; }
+  .cap { font-family: var(--mono); font-size: .72rem; color: var(--faint); letter-spacing: .04em; margin: 8px 2px 0; }
+
+  /* ---------- wireframe ---------- */
+  .wire {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    grid-template-rows: auto 1fr auto;
+    gap: 10px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    padding: 12px;
+    margin: 18px 0;
+    min-height: 320px;
+  }
+  .wire .box {
+    background: var(--surface);
+    border: 1px dashed var(--line);
+    border-radius: 7px;
+    padding: 12px;
+    font-size: .82rem;
+    color: var(--muted);
+  }
+  .wire .box b { color: var(--ink); font-size: .78rem; font-family: var(--mono); letter-spacing: .04em; display:block; margin-bottom: 6px; text-transform: uppercase; }
+  .wire .lib { grid-row: 1 / 4; }
+  .wire .top { }
+  .wire .main { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .wire .foot { grid-column: 2; border-color: color-mix(in srgb, var(--loop) 45%, var(--line)); }
+  .wire .mini-wave { display:flex; gap:2px; align-items:center; height:44px; margin-top:8px; position: relative; }
+  .wire .mini-wave i { flex:1; background: var(--accent); opacity:.5; border-radius:1px; }
+  .wire .mini-wave .sel { position:absolute; top:-4px; bottom:-4px; left:40%; width:22%; background: var(--loop-weak); border-left:2px solid var(--loop); border-right:2px solid var(--loop); border-radius:2px; }
+  @media (max-width: 620px) {
+    .wire { grid-template-columns: 1fr; grid-template-rows: none; }
+    .wire .lib { grid-row: auto; }
+    .wire .foot { grid-column: auto; }
+    nav.toc ol { columns: 1; }
+  }
+
+  /* ---------- milestones ---------- */
+  .miles { display: flex; flex-direction: column; gap: 12px; margin: 18px 0; }
+  .mile {
+    display: grid;
+    grid-template-columns: 92px 1fr;
+    gap: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: 16px 18px;
+  }
+  .mile .m-id { font-family: var(--mono); font-weight: 600; color: var(--accent-ink); font-size: .9rem; }
+  .mile .m-id small { display:block; color: var(--faint); font-weight: 400; font-size: .72rem; letter-spacing:.04em; margin-top: 3px; }
+  .mile h4 { margin: 0 0 6px; font-size: 1rem; }
+  .mile ul { margin: 0; padding-left: 1.1em; font-size: .9rem; color: var(--muted); }
+  .mile.m1 { border-left: 3px solid var(--accent); }
+  .mile.m2 { border-left: 3px solid var(--accent); }
+  .mile.m3 { border-left: 3px solid var(--loop); }
+  .mile.m4 { border-left: 3px solid var(--line); }
+
+  footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--line); color: var(--faint); font-family: var(--mono); font-size: .74rem; letter-spacing: .04em; }
+
+  ::selection { background: var(--loop-weak); }
+  a:focus-visible, li a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+</style>
+
+<div class="wrap">
+  <header class="hero">
+    <div class="eyebrow">
+      <span>설계 문서</span><span class="dot">/</span>
+      <span>v0.2</span><span class="dot">/</span>
+      <span>2026-07-28</span><span class="dot">/</span>
+      <span>로컬 우선 · Supabase 동기화</span>
+    </div>
+    <h1>도돌이 <span class="en">dodori</span></h1>
+    <p class="lede">mp3를 올려두고 반복하고 싶은 구간을 자유롭게 잡아, 그 부분만 집중해서 파고드는 <strong>구간 반복 보컬 연습</strong> 웹 앱.</p>
+
+    <div class="wave" id="wf" aria-hidden="true">
+      <div class="loop"></div>
+    </div>
+    <div class="wave-cap">
+      <span>00:00.0</span>
+      <span class="a">◤ A — B ◥ &nbsp;선택 구간 반복</span>
+      <span>03:42.0</span>
+    </div>
+  </header>
+
+  <nav class="toc" aria-label="목차">
+    <h2>목차</h2>
+    <ol>
+      <li><span class="n">01</span><a href="#s1">개요와 범위</a></li>
+      <li><span class="n">02</span><a href="#s2">사용자 시나리오</a></li>
+      <li><span class="n">03</span><a href="#s3">화면 구조</a></li>
+      <li><span class="n">04</span><a href="#s4">드릴 모드 스펙</a></li>
+      <li><span class="n">05</span><a href="#s5">데이터 모델</a></li>
+      <li><span class="n">06</span><a href="#s6">오디오 아키텍처</a></li>
+      <li><span class="n">07</span><a href="#s7">기술 스택</a></li>
+      <li><span class="n">08</span><a href="#s8">마일스톤</a></li>
+      <li><span class="n">09</span><a href="#s9">결정 사항</a></li>
+    </ol>
+  </nav>
+
+  <!-- 01 -->
+  <section id="s1">
+    <div class="col">
+      <h2 class="sec"><span class="num">01</span>개요와 범위</h2>
+      <p><strong>한 줄 정의.</strong> 내 mp3 음원을 브라우저에서 열어, 파형 위에서 A-B 구간을 지정하고, 그 구간을 원하는 방식(느리게 · 반복 횟수 · 쉬는 틈 · 키 조절)으로 반복 연습하는 도구.</p>
+
+      <h3>핵심 가치</h3>
+      <ul>
+        <li><strong>정밀한 구간 반복</strong> — 이음새가 매끄러운 루프로 같은 소절을 지치지 않고 돌려 듣기.</li>
+        <li><strong>집중 드릴</strong> — 어려운 부분만 떼어내 근육 기억이 생길 때까지 반복.</li>
+        <li><strong>내 몸에 맞추기</strong> — 속도는 늦추되 음정은 유지, 키는 내 음역대로 이동.</li>
+      </ul>
+
+      <h3>타깃 사용자</h3>
+      <p>혼자 노래·보컬을 연습하는 사람. 학원 없이 원곡을 반복하며 특정 파트(고음, 브릿지, 랩 벌스)를 파는 사용자.</p>
+
+      <h3>MVP 범위와 비목표</h3>
+      <div class="tbl-scroll">
+        <table>
+          <thead><tr><th>포함 (MVP)</th><th>제외 (나중에)</th></tr></thead>
+          <tbody>
+            <tr><td>로컬 mp3 열기 · 파형 표시</td><td>실시간 음정(피치) 채점</td></tr>
+            <tr><td>A-B 구간 지정 · 정밀 루프 <span class="mono">AudioBuffer</span></td><td>내 목소리 녹음·비교</td></tr>
+            <tr><td>속도 · 키 조절 <span class="mono">soundtouchjs</span></td><td>곡/구간 공유, 협업</td></tr>
+            <tr><td>구간 북마크 · IndexedDB 로컬 저장</td><td>스트리밍 서비스 연동</td></tr>
+            <tr><td>드릴 설정(반복·간격·카운트인)</td><td>계정 · 클라우드 동기화 · PWA → M3</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note">
+        <span class="lbl">핵심 결정</span>
+        <strong>M1은 서버 없이 브라우저 안에서만</strong> 동작한다. mp3는 업로드하지 않고 <span class="tag teal">IndexedDB</span>에 로컬 저장 → 저작권·저장비용·업로드 지연에서 자유롭고, 개발이 빠르다.
+        <strong>M3부터는 <span class="tag teal">Supabase</span>로 동기화</strong>한다 — <em>PC에서 잡아둔 구간·드릴 설정을 모바일에서 그대로 열어 연습하는 것</em>이 목표다. 저장 계층은 <a href="#s5">05 데이터 모델</a> 참고.
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 -->
+  <section id="s2">
+    <div class="col">
+      <h2 class="sec"><span class="num">02</span>사용자 시나리오</h2>
+      <p>핵심 흐름은 <strong>불러오기 → 구간 지정 → 드릴</strong> 세 단계다. 연습 중에는 구간을 바꿔가며 같은 루프에 머문다.</p>
+    </div>
+    <div class="diagram">
+      <pre class="mermaid">
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#E7F3F0','primaryTextColor':'#123230','primaryBorderColor':'#0B7C6E','lineColor':'#8A9794','secondaryColor':'#FaE8D6','fontFamily':'ui-monospace, Menlo, monospace','fontSize':'13px'}}}%%
+flowchart LR
+  A["곡 불러오기<br/>(mp3 열기)"] --> B["파형 확인"]
+  B --> C["A-B 구간 지정"]
+  C --> D["드릴 설정<br/>속도·반복·키"]
+  D --> E["반복 연습"]
+  E -->|다른 소절로| C
+  E -->|끝| F["연습 기록 저장"]
+      </pre>
+    </div>
+    <p class="cap">그림 1 · 핵심 사용자 흐름. 'C ↔ E' 순환이 이 제품의 심장이다.</p>
+  </section>
+
+  <!-- 03 -->
+  <section id="s3">
+    <div class="col">
+      <h2 class="sec"><span class="num">03</span>화면 구조</h2>
+      <p>화면은 크게 두 개다. <strong>라이브러리</strong>(내 곡 목록)와 <strong>연습 화면</strong>(플레이어). 연습 화면 하나에 파형·구간·드릴 컨트롤을 모은다.</p>
+    </div>
+
+    <div class="wire" aria-label="연습 화면 와이어프레임">
+      <div class="box lib">
+        <b>라이브러리</b>
+        내 곡 목록<br>· 최근 연습<br>· 구간 북마크<br>· + 곡 추가
+      </div>
+      <div class="box top">
+        <b>트랜스포트</b>
+        재생/일시정지 · 현재 시간 · 속도 · 키(반음) · 볼륨
+      </div>
+      <div class="box main">
+        <b>파형 + 구간</b>
+        드래그로 A-B 구간 선택, 저장된 구간이 색 밴드로 표시된다.
+        <div class="mini-wave" aria-hidden="true">
+          <div class="sel"></div>
+        </div>
+      </div>
+      <div class="box foot">
+        <b>드릴 컨트롤</b>
+        반복 횟수 · 반복 간격 · 점진적 속도 · 카운트인 · 메트로놈
+      </div>
+    </div>
+    <p class="cap">그림 2 · 연습 화면 레이아웃(개념). 좌측 라이브러리 + 우측 플레이어.</p>
+
+    <div class="col">
+      <h3>구성 요소</h3>
+      <ul>
+        <li><strong>파형 뷰</strong> — 클릭으로 이동, 드래그로 구간 선택. 저장된 구간은 반투명 밴드(<span class="tag amber">amber</span>)로 겹쳐 표시.</li>
+        <li><strong>구간 리스트</strong> — 곡마다 여러 북마크("1절 고음", "브릿지")를 저장, 클릭 한 번에 그 루프로 진입.</li>
+        <li><strong>드릴 패널</strong> — 현재 선택 구간에 적용할 반복 규칙. 프리셋으로 저장 가능.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 04 -->
+  <section id="s4">
+    <div class="col">
+      <h2 class="sec"><span class="num">04</span>드릴 모드 스펙</h2>
+      <p>단순 A-B 반복을 넘어, 실제 연습에 효과가 있는 파라미터를 붙인다. 이 표가 제품의 차별점이다.</p>
+    </div>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>기능</th><th>파라미터</th><th>기본값</th><th>설명</th></tr></thead>
+        <tbody>
+          <tr><td>구간 반복</td><td class="mono">loopCount</td><td class="num-cell">무한</td><td>선택 A-B 구간을 지정 횟수만큼(또는 무한) 반복.</td></tr>
+          <tr><td>반복 간격</td><td class="mono">gapSec</td><td class="num-cell">0s</td><td>반복 사이 쉬는 시간 — 원곡을 듣고, 그 틈에 내가 따라 부른다.</td></tr>
+          <tr><td>속도 조절</td><td class="mono">speed</td><td class="num-cell">1.0×</td><td>0.5–1.0×로 느리게, <strong>음정은 유지</strong>. 어려운 소절 해부용.</td></tr>
+          <tr><td>점진적 속도</td><td class="mono">progressive</td><td class="num-cell">off</td><td>느리게 시작 → 반복마다 +step 빨라져 원속도까지. 근육 기억 훈련.</td></tr>
+          <tr><td>키 조절</td><td class="mono">pitchSemitones</td><td class="num-cell">0</td><td>±6반음 이동, 원곡을 내 음역대에 맞춤.</td></tr>
+          <tr><td>카운트인</td><td class="mono">countIn</td><td class="num-cell">off</td><td>루프 시작 전 "하나 둘 셋 넷" 들어가는 박 잡기.</td></tr>
+          <tr><td>메트로놈</td><td class="mono">metronomeBpm</td><td class="num-cell">off</td><td>박자 클릭을 원곡 위에 오버레이.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note">
+      <span class="lbl">차별화 포인트</span>
+      <strong>점진적 속도</strong>와 <strong>반복 간격(따라 부르기 틈)</strong>은 대부분의 무료 AB-루퍼가 갖지 않은 기능이다. 여기에 집중하면 "그냥 반복 재생기"와 확실히 갈린다.
+    </div>
+  </section>
+
+  <!-- 05 -->
+  <section id="s5">
+    <div class="col">
+      <h2 class="sec"><span class="num">05</span>데이터 모델</h2>
+      <p>네 개의 엔티티로 충분하다. M1에서는 모두 <span class="tag teal">IndexedDB</span>에 저장 — 원본 <span class="mono">Blob</span>과 파형 캐시까지 로컬에 둔다. M3 동기화를 위해 <span class="mono">fileHash</span>(기기 간 같은 곡 식별)와 <span class="mono">updatedAt</span>(충돌 해소)만 처음부터 넣어둔다.</p>
+    </div>
+    <pre class="code"><span class="c">// 곡 — 원본 mp3와 메타데이터</span>
+<span class="k">interface</span> <span class="t">Song</span> {
+  id: string
+  userId?: string         <span class="c">// M3 로그인 후에만 채워짐</span>
+  title: string
+  artist?: string
+  durationSec: number
+  fileHash: string        <span class="c">// 내용 해시 — 기기 간 같은 곡 식별</span>
+  fileBlob?: <span class="t">Blob</span>         <span class="c">// 로컬 원본(IndexedDB). 모바일은 없을 수 있다</span>
+  remotePath?: string     <span class="c">// M3: Supabase Storage 경로(선택 업로드)</span>
+  peaks?: number[]        <span class="c">// 파형 렌더 캐시(재계산 방지, 동기화 X)</span>
+  createdAt: number
+  updatedAt: number       <span class="c">// 동기화 충돌 해소(최신 쓰기 우선)</span>
+  lastPracticedAt?: number
+}
+
+<span class="c">// 구간 — A-B 반복 지점이자 북마크</span>
+<span class="k">interface</span> <span class="t">Region</span> {
+  id: string
+  songId: string
+  label: string           <span class="c">// "1절 고음", "브릿지"</span>
+  startSec: number
+  endSec: number
+  color?: string
+  updatedAt: number
+  deletedAt?: number      <span class="c">// tombstone — 삭제도 동기화되어야 한다</span>
+}
+
+<span class="c">// 드릴 설정 — 한 구간을 어떻게 반복할지</span>
+<span class="c">// (독립 테이블이 아니라 Region 또는 프리셋에 embed — 구간과 함께 동기화된다)</span>
+<span class="k">interface</span> <span class="t">DrillSettings</span> {
+  loopCount: number | <span class="s">'infinite'</span>
+  gapSec: number                 <span class="c">// 반복 사이 쉬는 시간</span>
+  speed: number                  <span class="c">// 0.5 – 1.0 (피치 유지)</span>
+  pitchSemitones: number         <span class="c">// -6 – +6</span>
+  countIn: boolean
+  metronomeBpm?: number
+  progressive?: {                <span class="c">// 점진적 속도 상승</span>
+    startSpeed: number
+    step: number
+    targetSpeed: number
+  }
+}
+
+<span class="c">// 연습 기록 — 통계/동기부여용</span>
+<span class="k">interface</span> <span class="t">PracticeSession</span> {
+  id: string
+  songId: string
+  regionId?: string
+  startedAt: number
+  reps: number
+  practiceSec: number
+}</pre>
+    <div class="col">
+      <p>저장소는 얇은 래퍼(<span class="mono">Dexie</span>) 위에 리포지토리 함수로 감싼다 — M3에서 클라우드 백엔드를 붙일 때 이 경계만 바꾸면 된다.</p>
+
+      <h3>저장 계층 — 로컬 우선, 클라우드는 거울</h3>
+      <p>동기화의 목표는 <strong>PC에서 잡은 구간을 모바일에서 여는 것</strong>이다. 그런데 mp3 원본까지 전부 올리면 저작권·용량·비용이 한꺼번에 따라온다. 그래서 <strong>가벼운 데이터는 항상 동기화, 무거운 원본은 곡별 선택 업로드</strong>로 나눈다.</p>
+    </div>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>데이터</th><th>로컬 (M1~)</th><th>클라우드 (M3~)</th></tr></thead>
+        <tbody>
+          <tr><td>곡 메타 · 구간 · 드릴 설정 · 연습 기록</td><td class="mono">IndexedDB</td><td>Supabase Postgres — <strong>항상 동기화</strong></td></tr>
+          <tr><td>mp3 원본</td><td class="mono">IndexedDB Blob</td><td>Supabase Storage(비공개 버킷) — <strong>곡별 선택 업로드</strong></td></tr>
+          <tr><td>파형 peaks</td><td class="mono">IndexedDB 캐시</td><td>동기화 안 함 — 기기에서 재계산</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="diagram">
+      <pre class="mermaid">
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#E7F3F0','primaryTextColor':'#123230','primaryBorderColor':'#0B7C6E','lineColor':'#8A9794','fontFamily':'ui-monospace, Menlo, monospace','fontSize':'13px'}}}%%
+flowchart LR
+  subgraph PC["PC (구간을 잡는 곳)"]
+    P["IndexedDB<br/>곡 · 구간 · 드릴"]
+  end
+  subgraph SB["Supabase (Auth · RLS로 내 데이터만)"]
+    D["Postgres<br/>구간 · 드릴 · 기록"]
+    S["Storage<br/>mp3 (선택)"]
+  end
+  subgraph MO["모바일 (연습하는 곳)"]
+    M["IndexedDB 캐시"]
+  end
+  P -->|"push · updatedAt"| D
+  D -->|pull| M
+  P -.->|"선택 업로드"| S
+  S -.->|"내려받아 디코딩"| M
+      </pre>
+    </div>
+    <p class="cap">그림 3 · 동기화 구조. 실선은 항상, 점선은 사용자가 켠 곡만.</p>
+
+    <div class="col">
+      <p>충돌은 <strong>최신 쓰기 우선</strong>(<span class="mono">updatedAt</span> 비교)으로 끝낸다 — 혼자 쓰는 도구라 이 이상은 과설계다. 삭제는 즉시 지우지 않고 <span class="mono">deletedAt</span> tombstone으로 표시해야 다른 기기에서 되살아나지 않는다.</p>
+    </div>
+  </section>
+
+  <!-- 06 -->
+  <section id="s6">
+    <div class="col">
+      <h2 class="sec"><span class="num">06</span>오디오 아키텍처</h2>
+      <p>제품 품질을 가르는 부분. <strong>루프 정밀도</strong>와 <strong>피치 유지 속도조절</strong> 두 가지가 관건이다.</p>
+
+      <div class="note warn">
+        <span class="lbl">기술 핵심</span>
+        <span class="tag">&lt;audio&gt;</span> 태그의 <span class="mono">loop</span>/<span class="mono">timeupdate</span>로 구간 반복을 만들면 이음새에서 미세한 끊김·부정확이 생긴다. mp3를 <span class="mono">AudioBuffer</span>로 디코딩해 <span class="mono">AudioBufferSourceNode</span>의 <span class="mono">loopStart</span> / <span class="mono">loopEnd</span>를 쓰면 <strong>샘플 단위로 정확하고 매끄러운 루프</strong>가 된다.
+      </div>
+    </div>
+
+    <div class="diagram">
+      <pre class="mermaid">
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#E7F3F0','primaryTextColor':'#123230','primaryBorderColor':'#0B7C6E','lineColor':'#8A9794','fontFamily':'ui-monospace, Menlo, monospace','fontSize':'13px'}}}%%
+flowchart LR
+  F["mp3 파일"] --> D["decodeAudioData"]
+  D --> B["AudioBuffer"]
+  B --> S["SourceNode · 루프<br/>loopStart / loopEnd"]
+  S --> T["SoundTouch<br/>속도 · 피치"]
+  M["메트로놈 클릭"] --> G["GainNode"]
+  T --> G
+  G --> An["Analyser · 파형"]
+  An --> O["출력"]
+      </pre>
+    </div>
+    <p class="cap">그림 4 · Web Audio 신호 그래프.</p>
+
+    <div class="col">
+      <h3>속도 · 피치 독립 제어</h3>
+      <ul>
+        <li><span class="tag done">확정</span> <strong><span class="mono">AudioBuffer</span> 경로 + <span class="tag teal">soundtouchjs</span></strong>로 템포/피치를 독립 제어. 속도 조절과 키 조절을 동시에 정확히 준다. M1부터 이 경로로 간다.</li>
+        <li><strong>보류</strong> — <span class="mono">HTMLAudioElement.playbackRate</span> + <span class="mono">preservesPitch=true</span>. 코드는 적지만 루프 정밀도·유연성이 떨어져 채택하지 않는다.</li>
+        <li><strong>교체 여지</strong> — soundtouchjs의 음질이 부족하면 AudioWorklet 자체 구현으로 이 노드만 갈아끼운다. 그래프의 나머지는 그대로다.</li>
+      </ul>
+      <h3>파형 계산</h3>
+      <p>큰 파일은 <span class="mono">OfflineAudioContext</span> 또는 Web Worker에서 피크를 계산해 메인 스레드 프리징을 피하고, 결과를 <span class="mono">Song.peaks</span>에 캐시한다.</p>
+    </div>
+  </section>
+
+  <!-- 07 -->
+  <section id="s7">
+    <div class="col">
+      <h2 class="sec"><span class="num">07</span>기술 스택</h2>
+    </div>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>영역</th><th>선택</th><th>비고 / 대안</th></tr></thead>
+        <tbody>
+          <tr><td>프레임워크</td><td class="mono">Vite + React + TS</td><td>가볍게 시작, 나중에 Next.js로 확장 가능</td></tr>
+          <tr><td>파형 UI</td><td class="mono">wavesurfer.js</td><td>Regions 플러그인으로 A-B 드래그 선택 즉시 지원</td></tr>
+          <tr><td>정밀 재생</td><td class="mono">Web Audio API</td><td>AudioBufferSourceNode 루프 — <span class="tag done">확정</span></td></tr>
+          <tr><td>속도/피치</td><td class="mono">soundtouchjs</td><td>M1부터 적용 — <span class="tag done">확정</span>. 부족하면 AudioWorklet으로 교체</td></tr>
+          <tr><td>로컬 저장</td><td class="mono">Dexie (IndexedDB)</td><td>Blob·구간·설정·기록</td></tr>
+          <tr><td>계정 · 동기화</td><td class="mono">Supabase</td><td>M3 — Auth + Postgres(RLS) + Storage(비공개 버킷)</td></tr>
+          <tr><td>설치형</td><td class="mono">vite-plugin-pwa</td><td>M3 — 홈 화면 설치 · 오프라인 재생</td></tr>
+          <tr><td>상태 관리</td><td class="mono">Zustand</td><td>재생 상태/드릴 설정은 가벼운 스토어로 충분</td></tr>
+          <tr><td>스타일</td><td class="mono">Tailwind / CSS</td><td>취향껏. 모바일은 반응형으로 커버</td></tr>
+          <tr><td>배포</td><td class="mono">Vercel</td><td>정적 호스팅 + Supabase 매니지드 백엔드</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 08 -->
+  <section id="s8">
+    <div class="col">
+      <h2 class="sec"><span class="num">08</span>마일스톤</h2>
+    </div>
+    <div class="miles">
+      <div class="mile m1">
+        <div class="m-id">M1<small>MVP</small></div>
+        <div>
+          <h4>구간 반복이 되는 최소 제품</h4>
+          <ul>
+            <li>mp3 열기 → 파형 → 드래그로 A-B 구간</li>
+            <li>정밀 루프 재생 + 속도 조절(피치 유지)</li>
+            <li>최근 곡·구간 IndexedDB 저장</li>
+          </ul>
+        </div>
+      </div>
+      <div class="mile m2">
+        <div class="m-id">M2<small>드릴 강화</small></div>
+        <div>
+          <h4>연습에 진짜 쓰이는 드릴</h4>
+          <ul>
+            <li>반복 횟수 · 반복 간격 · 점진적 속도</li>
+            <li>키(피치) 조절 · 카운트인 · 메트로놈</li>
+            <li>구간 북마크 여러 개 · 드릴 프리셋</li>
+          </ul>
+        </div>
+      </div>
+      <div class="mile m3">
+        <div class="m-id">M3<small>동기화</small></div>
+        <div>
+          <h4>PC에서 잡고, 모바일에서 연습</h4>
+          <ul>
+            <li>Supabase Auth 로그인 · 구간/드릴/기록 동기화</li>
+            <li>mp3 곡별 선택 업로드(Storage) — 저장 용량 한계 해소</li>
+            <li>PWA 설치형 · 오프라인 재생 · 연습 통계</li>
+          </ul>
+        </div>
+      </div>
+      <div class="mile m4">
+        <div class="m-id">M4<small>확장</small></div>
+        <div>
+          <h4>차별화 기능</h4>
+          <ul>
+            <li>내 목소리 녹음 → 원곡과 비교</li>
+            <li>피치 그래프(음정 시각화) · 곡 공유</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 09 -->
+  <section id="s9">
+    <div class="col">
+      <h2 class="sec"><span class="num">09</span>결정 사항</h2>
+      <p>착수 전에 열려 있던 다섯 항목은 아래와 같이 정해졌다.</p>
+      <ul>
+        <li><span class="tag done">결정됨</span> <strong>루프 정밀도</strong> — 처음부터 <strong>AudioBuffer</strong>로 간다. HTMLAudio 임시 구현은 건너뛴다. 이음새 품질이 핵심 가치라, 나중에 교체하면 재생 상태·UI를 다시 만들게 된다.</li>
+        <li><span class="tag done">결정됨</span> <strong>속도/피치 엔진</strong> — <strong>soundtouchjs</strong>로 M1부터 빠르게 붙인다. AudioWorklet 자체 구현은 음질 부족이 실제로 확인될 때만.</li>
+        <li><span class="tag done">결정됨</span> <strong>저장 · 동기화</strong> — <strong>Supabase</strong> 채택. 구간·드릴 설정·기록은 항상 동기화하고, mp3 원본은 곡별 선택 업로드. <em>PC에서 설정한 구간을 모바일에서 그대로 여는 것</em>이 이 항목의 목표이자 M3 완료 기준이다.</li>
+        <li><span class="tag done">결정됨</span> <strong>PWA/오프라인</strong> — 설치형으로 간다. 다만 급하지 않으므로 M3에 배치.</li>
+        <li><span class="tag done">결정됨</span> <strong>모바일</strong> — 반응형 웹으로 커버. 네이티브는 수요 확인 후.</li>
+      </ul>
+
+      <h3>결정에서 파생된 남은 질문</h3>
+      <ul>
+        <li><strong>모바일에 mp3가 없을 때</strong> — Storage에서 스트리밍할지, 통째로 내려받아 캐시할지. 정밀 루프는 <span class="mono">AudioBuffer</span>를 요구하므로 <strong>전체 다운로드 후 디코딩</strong>이 유력하다(3–5분 곡이면 감내할 만한 대기).</li>
+        <li><strong>같은 곡 식별</strong> — <span class="mono">fileHash</span>로 매칭한다. 같은 곡이라도 인코딩이 다르면 별개 곡이 되고 구간 시간축도 어긋날 수 있다.</li>
+        <li><strong>무료 티어 한도</strong> — Supabase Storage 한도를 넘길 때 업로드 곡 수를 제한할지, 유료로 넘어갈지. 우선 <strong>용량 표시 + 곡 수 제한</strong>으로 버틴다.</li>
+      </ul>
+
+      <div class="note">
+        <span class="lbl">진행 상황</span>
+        <strong>M1 구현 완료</strong> — 파일 열기 → 파형 → A-B 루프 → 속도·키 조절이 동작합니다. 실행 방법과 구조는 <span class="mono">README.md</span>, 루프 정밀도의 핵심은 <span class="mono">src/audio/loopSource.ts</span>. 다음은 <strong>M2 드릴 강화</strong>(반복 횟수 · 반복 간격 · 점진적 속도 · 카운트인 · 메트로놈).
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    도돌이 · 설계 문서 v0.2 · 로컬 우선 MVP + Supabase 동기화 · 2026-07-28
+  </footer>
+</div>
+
+<script>
+  // 헤더 파형 모티프 — 결정적(하드코딩) 엔벌로프
+  (function () {
+    var peaks = [16,26,40,55,48,64,80,60,42,54,70,88,74,50,36,58,78,92,66,46,40,62,86,70,54,44,58,76,90,72,50,34,48,66,84,68,52,40,56,74,86,62,44,32,46,64,80,70,54,42,58,72,64,48,34,24];
+    var wf = document.getElementById('wf');
+    if (!wf) return;
+    var loop = wf.querySelector('.loop');
+    peaks.forEach(function (h, i) {
+      var b = document.createElement('span');
+      b.className = 'bar';
+      // 루프 밴드 구간(33%~60%)의 바는 강조
+      var pos = i / peaks.length;
+      if (pos >= 0.33 && pos <= 0.60) b.className += ' in';
+      b.style.height = Math.max(8, h) + '%';
+      wf.insertBefore(b, loop);
+    });
+  })();
+</script>

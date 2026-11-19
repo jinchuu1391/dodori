@@ -1,0 +1,270 @@
+import { create } from 'zustand'
+import { engine } from '../audio/engine'
+import { computePeaks } from '../audio/peaks'
+import { sha256Hex } from '../audio/hash'
+import * as repo from '../db/repo'
+import type { Region, Song } from '../types'
+import { PITCH_MAX, PITCH_MIN, SPEED_MAX, SPEED_MIN } from '../types'
+import { clamp } from '../util/time'
+
+const LAST_SONG_KEY = 'dodori:lastSongId'
+
+/** StrictMode가 개발 중 effect를 두 번 돌린다. 곡을 두 번 디코딩하지 않도록 막는다 */
+let initStarted = false
+
+export interface Selection {
+  startSec: number
+  endSec: number
+}
+
+interface PlayerState {
+  songs: Song[]
+  song: Song | null
+  buffer: AudioBuffer | null
+  peaks: number[] | null
+  regions: Region[]
+  activeRegionId: string | null
+
+  selection: Selection | null
+  loopEnabled: boolean
+
+  isPlaying: boolean
+  speed: number
+  pitchSemitones: number
+  volume: number
+
+  status: string | null
+  error: string | null
+  storage: { usedBytes: number; quotaBytes: number } | null
+
+  init: () => Promise<void>
+  openFiles: (files: FileList | File[]) => Promise<void>
+  selectSong: (id: string) => Promise<void>
+  removeSong: (id: string) => Promise<void>
+
+  /** commit=false면 화면만 갱신하고 엔진 루프는 건드리지 않는다(드래그 중) */
+  setSelection: (sel: Selection | null, commit?: boolean) => void
+  saveSelectionAsRegion: (label: string) => Promise<void>
+  applyRegion: (id: string) => void
+  renameRegion: (id: string, label: string) => Promise<void>
+  removeRegion: (id: string) => Promise<void>
+
+  togglePlay: () => Promise<void>
+  seek: (sec: number) => void
+  setLoopEnabled: (on: boolean) => void
+  setSpeed: (v: number) => void
+  setPitch: (v: number) => void
+  setVolume: (v: number) => void
+}
+
+export const usePlayer = create<PlayerState>()((set, get) => {
+  /** 선택 구간 + 루프 스위치를 엔진에 반영 */
+  const syncLoop = () => {
+    const { selection, loopEnabled } = get()
+    if (loopEnabled && selection) engine.setLoop(selection.startSec, selection.endSec)
+    else engine.setLoop(null, null)
+  }
+
+  const refreshStorage = async () => {
+    set({ storage: await repo.estimateStorage() })
+  }
+
+  return {
+    songs: [],
+    song: null,
+    buffer: null,
+    peaks: null,
+    regions: [],
+    activeRegionId: null,
+    selection: null,
+    loopEnabled: true,
+    isPlaying: false,
+    speed: 1,
+    pitchSemitones: 0,
+    volume: 1,
+    status: null,
+    error: null,
+    storage: null,
+
+    async init() {
+      if (initStarted) return
+      initStarted = true
+      engine.on({ onEnded: () => set({ isPlaying: false }) })
+      engine.setVolume(get().volume)
+      const songs = await repo.listSongs()
+      set({ songs })
+      await refreshStorage()
+
+      const last = localStorage.getItem(LAST_SONG_KEY)
+      if (last && songs.some((s) => s.id === last)) {
+        await get().selectSong(last)
+      }
+    },
+
+    async openFiles(files) {
+      const list = Array.from(files).filter((f) => f.type.startsWith('audio/') || /\.(mp3|m4a|wav|ogg|flac)$/i.test(f.name))
+      if (list.length === 0) {
+        set({ error: '오디오 파일이 아닙니다.' })
+        return
+      }
+
+      let lastId: string | null = null
+      for (const file of list) {
+        try {
+          set({ status: `${file.name} 읽는 중…`, error: null })
+          const raw = await file.arrayBuffer()
+          const fileHash = await sha256Hex(raw)
+
+          const existing = await repo.findSongByHash(fileHash)
+          if (existing) {
+            lastId = existing.id
+            continue
+          }
+
+          set({ status: `${file.name} 디코딩 중…` })
+          // decodeAudioData는 넘긴 ArrayBuffer를 detach한다. 원본은 File(Blob)로 따로 보관한다
+          const buffer = await engine.decode(raw)
+          const peaks = computePeaks(buffer)
+
+          const song = await repo.addSong({
+            title: file.name.replace(/\.[^.]+$/, ''),
+            durationSec: buffer.duration,
+            fileHash,
+            fileBlob: file,
+            peaks,
+          })
+          lastId = song.id
+        } catch (e) {
+          set({ error: `${file.name}: ${e instanceof Error ? e.message : '열 수 없습니다'}` })
+        }
+      }
+
+      set({ status: null, songs: await repo.listSongs() })
+      await refreshStorage()
+      if (lastId) await get().selectSong(lastId)
+    },
+
+    async selectSong(id) {
+      const song = await repo.getSong(id)
+      if (!song?.fileBlob) {
+        set({ error: '이 기기에 원본 파일이 없습니다.' })
+        return
+      }
+
+      engine.pause()
+      set({ status: '불러오는 중…', error: null, isPlaying: false, selection: null, activeRegionId: null })
+
+      try {
+        const buffer = await engine.decode(await song.fileBlob.arrayBuffer())
+        engine.load(buffer)
+        engine.setSpeed(get().speed)
+        engine.setPitchSemitones(get().pitchSemitones)
+
+        // 캐시된 피크가 있으면 재계산하지 않는다
+        let peaks = song.peaks
+        if (!peaks || peaks.length === 0) {
+          peaks = computePeaks(buffer)
+          await repo.cachePeaks(song.id, peaks)
+        }
+
+        const regions = await repo.listRegions(song.id)
+        set({ song, buffer, peaks, regions, status: null })
+        localStorage.setItem(LAST_SONG_KEY, song.id)
+        await repo.touchSong(song.id)
+        syncLoop()
+      } catch (e) {
+        set({ status: null, error: e instanceof Error ? e.message : '디코딩 실패' })
+      }
+    },
+
+    async removeSong(id) {
+      await repo.deleteSong(id)
+      if (get().song?.id === id) {
+        engine.unload()
+        localStorage.removeItem(LAST_SONG_KEY)
+        set({ song: null, buffer: null, peaks: null, regions: [], selection: null, isPlaying: false })
+      }
+      set({ songs: await repo.listSongs() })
+      await refreshStorage()
+    },
+
+    /**
+     * 드래그 중에는 commit=false. A-B가 바뀔 때마다 engine.setLoop을 부르면
+     * SimpleFilter가 매번 clear()되어 소리가 튄다. 손을 뗄 때 한 번만 반영한다.
+     */
+    setSelection(sel, commit = true) {
+      set({ selection: sel, activeRegionId: null })
+      if (commit) syncLoop()
+    },
+
+    async saveSelectionAsRegion(label) {
+      const { song, selection } = get()
+      if (!song || !selection) return
+      const region = await repo.addRegion({
+        songId: song.id,
+        label: label.trim() || '새 구간',
+        startSec: selection.startSec,
+        endSec: selection.endSec,
+      })
+      set({ regions: await repo.listRegions(song.id), activeRegionId: region.id })
+    },
+
+    applyRegion(id) {
+      const region = get().regions.find((r) => r.id === id)
+      if (!region) return
+      set({ selection: { startSec: region.startSec, endSec: region.endSec }, activeRegionId: id })
+      syncLoop()
+      engine.seekSec(region.startSec)
+    },
+
+    async renameRegion(id, label) {
+      const { song } = get()
+      if (!song) return
+      await repo.updateRegion(id, { label })
+      set({ regions: await repo.listRegions(song.id) })
+    },
+
+    async removeRegion(id) {
+      const { song } = get()
+      if (!song) return
+      await repo.removeRegion(id)
+      set({
+        regions: await repo.listRegions(song.id),
+        activeRegionId: get().activeRegionId === id ? null : get().activeRegionId,
+      })
+    },
+
+    async togglePlay() {
+      if (!engine.isLoaded) return
+      await engine.toggle()
+      set({ isPlaying: engine.isPlaying })
+    },
+
+    seek(sec) {
+      engine.seekSec(sec)
+    },
+
+    setLoopEnabled(on) {
+      set({ loopEnabled: on })
+      syncLoop()
+    },
+
+    setSpeed(v) {
+      const speed = clamp(Number(v.toFixed(2)), SPEED_MIN, SPEED_MAX)
+      engine.setSpeed(speed)
+      set({ speed })
+    },
+
+    setPitch(v) {
+      const pitchSemitones = clamp(Math.round(v), PITCH_MIN, PITCH_MAX)
+      engine.setPitchSemitones(pitchSemitones)
+      set({ pitchSemitones })
+    },
+
+    setVolume(v) {
+      const volume = clamp(v, 0, 1)
+      engine.setVolume(volume)
+      set({ volume })
+    },
+  }
+})

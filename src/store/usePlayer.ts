@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { engine } from '../audio/engine'
 import { type WaveLevels, buildWaveLevels } from '../audio/peaks'
 import { sha256Hex } from '../audio/hash'
+import { detectBeatGrid } from '../audio/detectBeats'
 import * as repo from '../db/repo'
 import type { BeatGrid, Region, Song } from '../types'
 import { PITCH_MAX, PITCH_MIN, SPEED_MAX, SPEED_MIN } from '../types'
@@ -75,6 +76,15 @@ interface PlayerState {
   setMetronomeVolume: (v: number) => void
   /** 지금 위치를 1박으로 찍는다. BPM·박자는 쓰던 값(없으면 DEFAULT_BPM, 4/4) */
   markBeat: () => void
+  /** 자동 박 감지 중 */
+  beatDetecting: boolean
+  /** 마지막 자동 감지의 신뢰도(Essentia 0–5.3, 1 미만이면 믿기 어려움). 첫 박을 손으로 찍으면 지운다 */
+  beatConfidence: number | null
+  /**
+   * 고른 구간(없으면 곡 전체)을 분석해 BPM과 첫 박을 채우고 메트로놈을 켠다.
+   * 첫 박은 구간 시작 이후 첫 박 — 강박(마디 1박)까지는 알지 못한다.
+   */
+  autoDetectBeat: () => Promise<void>
 }
 
 export const usePlayer = create<PlayerState>()((set, get) => {
@@ -110,6 +120,8 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     beatGrid: null,
     metronomeOn: false,
     metronomeVolume: 0.8,
+    beatDetecting: false,
+    beatConfidence: null,
     status: null,
     error: null,
     storage: null,
@@ -180,7 +192,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       engine.pause()
       set({
         status: '불러오는 중…', error: null, isPlaying: false, selection: null, activeRegionId: null,
-        beatGrid: null,
+        beatGrid: null, beatConfidence: null,
       })
 
       try {
@@ -242,7 +254,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       set({ selection: { startSec: region.startSec, endSec: region.endSec }, activeRegionId: id })
       // 구간에 박 격자가 있으면 그걸로, 없으면 쓰던 격자를 그대로(템포가 일정한 곡은 한 번만 맞추면 된다)
       if (region.beatGrid) {
-        set({ beatGrid: region.beatGrid })
+        set({ beatGrid: region.beatGrid, beatConfidence: null })
         syncMetronome()
       }
       syncLoop()
@@ -312,11 +324,38 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     markBeat() {
       if (!engine.isLoaded) return
       const g = get().beatGrid
+      set({ beatConfidence: null })
       get().setBeatGrid({
         bpm: g?.bpm ?? DEFAULT_BPM,
         anchorSec: engine.getPositionSec(),
         beatsPerBar: g?.beatsPerBar ?? 4,
       })
+    },
+
+    async autoDetectBeat() {
+      const { buffer, song, selection, beatDetecting } = get()
+      if (!buffer || !song || beatDetecting) return
+      const startSec = selection?.startSec ?? 0
+      const endSec = selection?.endSec ?? buffer.duration
+      set({ beatDetecting: true, status: '박 분석 중…', error: null })
+      try {
+        const found = await detectBeatGrid(buffer, startSec, endSec)
+        if (get().song?.id !== song.id) return // 분석하는 사이 곡을 바꿨다
+        if (!found) {
+          set({ error: '박을 찾지 못했어요. "첫 박 찍기"로 직접 잡아 주세요.' })
+          return
+        }
+        const bpm = clamp(found.bpm, BPM_MIN, BPM_MAX)
+        set({ beatConfidence: found.confidence })
+        get().setBeatGrid({ bpm, anchorSec: found.anchorSec, beatsPerBar: get().beatGrid?.beatsPerBar ?? 4 })
+        get().setMetronomeOn(true)
+      } catch (err) {
+        console.error(err)
+        if (get().song?.id === song.id) set({ error: '박 분석에 실패했어요.' })
+      } finally {
+        set({ beatDetecting: false })
+        if (get().status === '박 분석 중…') set({ status: null })
+      }
     },
 
     setPitch(v) {

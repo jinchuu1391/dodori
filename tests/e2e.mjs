@@ -29,18 +29,42 @@ const CHROME =
 const WORK = mkdtempSync(join(tmpdir(), 'dodori-e2e-'))
 const WAV = join(WORK, 'test-tone.wav')
 const SHOT = join(WORK, 'app.png')
+const CLICK_WAV = join(WORK, 'click-103.wav')
 
 /* ---------- 1초마다 음이 바뀌는 8초짜리 테스트 음원 ---------- */
 function makeWav(path, seconds = 8, rate = 44100) {
-  const n = seconds * rate
   const notes = [220, 277, 330, 440, 330, 277, 247, 220]
-  const data = Buffer.alloc(n * 4) // 16bit stereo
-  for (let i = 0; i < n; i++) {
+  writeWav(path, seconds * rate, rate, (i) => {
     const sec = Math.floor(i / rate)
     const f = notes[Math.min(notes.length - 1, sec)]
     // 소절마다 진폭 엔벌로프를 줘서 파형이 눈에 보이게
     const env = 0.35 + 0.45 * Math.abs(Math.sin((i / rate) * Math.PI))
-    const v = Math.round(Math.sin((2 * Math.PI * f * i) / rate) * 32767 * env)
+    return Math.sin((2 * Math.PI * f * i) / rate) * env
+  })
+}
+
+/* ---------- 자동 박 감지용: 일정한 BPM의 클릭 트랙(4박마다 높은 음) + 지속음 ---------- */
+const CLICK_BPM = 103
+const CLICK_OFFSET = 0.42
+function makeClickWav(path, seconds = 16, rate = 44100) {
+  const n = seconds * rate
+  const x = new Float32Array(n)
+  for (let i = 0; i < n; i++) x[i] = 0.1 * Math.sin((2 * Math.PI * 196 * i) / rate)
+  for (let k = 0; ; k++) {
+    const t = CLICK_OFFSET + (k * 60) / CLICK_BPM
+    if (t > seconds - 0.1) break
+    const s0 = Math.round(t * rate)
+    const f = k % 4 ? 900 : 1600
+    for (let i = 0; i < rate * 0.05 && s0 + i < n; i++) x[s0 + i] += 0.8 * Math.exp(-i / (rate * 0.007)) * Math.sin((2 * Math.PI * f * i) / rate)
+  }
+  writeWav(path, n, rate, (i) => Math.max(-1, Math.min(1, x[i])))
+}
+
+/** 16bit 스테레오(좌우 같은 값) WAV. sampleAt(i)는 −1..1 */
+function writeWav(path, n, rate, sampleAt) {
+  const data = Buffer.alloc(n * 4) // 16bit stereo
+  for (let i = 0; i < n; i++) {
+    const v = Math.round(sampleAt(i) * 32767)
     data.writeInt16LE(v, i * 4)
     data.writeInt16LE(v, i * 4 + 2)
   }
@@ -689,6 +713,53 @@ async function main() {
   const m3 = await metro()
   check('구간에 저장한 박 설정이 새로고침 후에도 돌아온다',
     m3.grid && m3.grid.bpm === 96.5 && Math.abs(m3.grid.anchorSec - 5.31) < 1e-6 && m3.grid.beatsPerBar === 3, JSON.stringify(m3.grid))
+
+  // 자동 박 감지 — 클릭 트랙을 넣고 "자동"을 누르면 BPM · 첫 박이 채워지고 메트로놈이 켜진다
+  makeClickWav(CLICK_WAV)
+  await cdp.eval(`window.__dodori.usePlayer.getState().setMetronomeOn(false)`)
+  {
+    const { root: r2 } = await cdp.send('DOM.getDocument')
+    const { nodeId: fileNode } = await cdp.send('DOM.querySelector', { nodeId: r2.nodeId, selector: 'input[type=file]' })
+    await cdp.send('DOM.setFileInputFiles', { nodeId: fileNode, files: [CLICK_WAV] })
+  }
+  let clickLoaded = false
+  for (let i = 0; i < 40 && !clickLoaded; i++) {
+    await sleep(250)
+    clickLoaded = await cdp.eval(`(() => { const s = window.__dodori.usePlayer.getState(); return s.song?.title === 'click-103' && !!s.buffer })()`)
+  }
+  check('자동 감지용 클릭 트랙을 연다', clickLoaded)
+  const autoBtn = `[...document.querySelectorAll('.metro .metro-mark')].find((b) => b.textContent.includes('자동'))`
+  const t0 = Date.now()
+  await cdp.eval(`${autoBtn}.click()`)
+  await sleep(100)
+  const busy = await cdp.eval(`${autoBtn}?.disabled ?? true`)
+  let detectDone = false
+  for (let i = 0; i < 120 && !detectDone; i++) {
+    await sleep(250)
+    detectDone = await cdp.eval(`!window.__dodori.usePlayer.getState().beatDetecting`)
+  }
+  const ms = Date.now() - t0
+  const m4 = await metro()
+  const err4 = await cdp.eval(`window.__dodori.usePlayer.getState().error`)
+  const P = 60 / CLICK_BPM
+  const phaseErr = m4.grid ? ((m4.grid.anchorSec - CLICK_OFFSET) / P - Math.round((m4.grid.anchorSec - CLICK_OFFSET) / P)) * P * 1000 : NaN
+  check('"자동"을 누르면 분석하는 동안 버튼이 잠긴다', busy === true)
+  check('"자동"으로 BPM을 찾는다', detectDone && m4.grid && Math.abs(m4.grid.bpm - CLICK_BPM) < 0.1,
+    `${m4.grid?.bpm} BPM (정답 ${CLICK_BPM}) · ${ms}ms${err4 ? ' · ' + err4 : ''}`)
+  check('"자동"으로 찾은 첫 박이 실제 박과 3ms 안에서 맞는다', Math.abs(phaseErr) < 3,
+    `첫 박 ${m4.grid?.anchorSec.toFixed(4)}초 · 어긋남 ${phaseErr.toFixed(2)}ms`)
+  check('자동 감지 후 메트로놈이 켜진다', m4.on)
+
+  await clickBtn('.metro-bpm .metro-wide[title="빠르기를 두 배로"]')
+  await sleep(50)
+  const m5 = await metro()
+  check('×2 는 BPM을 정확히 두 배로 (반올림 없이)', m5.grid.bpm === m4.grid.bpm * 2, `${m4.grid.bpm} → ${m5.grid.bpm}`)
+  await clickBtn('.metro-bpm .metro-wide[title="빠르기를 절반으로"]')
+  await clickBtn('.metro-anchor .metro-wide')
+  await sleep(50)
+  const m6 = await metro()
+  check('"강박 →"은 첫 박을 정확히 한 박 뒤로', m6.grid.bpm === m4.grid.bpm && Math.abs(m6.grid.anchorSec - m4.grid.anchorSec - 60 / m4.grid.bpm) < 1e-3,
+    `${m4.grid.anchorSec.toFixed(4)} → ${m6.grid.anchorSec.toFixed(4)}초`)
 
   await cdp.send('Page.captureScreenshot', { format: 'png' })
     .then((r) => writeFileSync(SHOT.replace(/\.png$/, '-metro.png'), Buffer.from(r.data, 'base64')))

@@ -60,6 +60,9 @@ export default function App() {
           도돌이 <span className="en">dodori</span>
         </h1>
         <span className="ver">M1 · 로컬 전용</span>
+        <a className="src-link" href="https://github.com/jinchuu1391/dodori" target="_blank" rel="noreferrer" title="소스 코드 (AGPL-3.0)">
+          소스 · AGPL-3.0
+        </a>
         {status && <span className="status">{status}</span>}
         {error && <span className="err">{error}</span>}
       </header>

@@ -196,7 +196,7 @@ export class AudioEngine {
     const clamped = Math.max(0, Math.min(frame, this.buffer.length - 1))
     // sourcePosition 대입은 내부 파이프를 clear한다 = 진짜 seek
     this.filter.sourcePosition = clamped
-    this.source.servedFrame = clamped
+    this.source.seek(clamped)
     this.restingFrame = clamped
     this.anchorFrame = clamped
     this.smooth = null
@@ -208,19 +208,22 @@ export class AudioEngine {
   /** endSec이 null이면 루프 해제 */
   setLoop(startSec: number | null, endSec: number | null) {
     if (!this.source || !this.buffer) return
+    const s = this.source
     const sr = this.buffer.sampleRate
+    // 재생 중에 바꿔도 읽던 자리에서 이어진다(LoopingBufferSource.setLoop 참고)
     if (startSec === null || endSec === null || endSec <= startSec) {
-      this.source.loop = false
+      s.setLoop(false, s.loopStartFrame, s.loopEndFrame)
       return
     }
-    this.source.loopStartFrame = Math.max(0, Math.round(startSec * sr))
-    this.source.loopEndFrame = Math.min(this.buffer.length, Math.round(endSec * sr))
-    this.source.loop = true
+    const a = Math.max(0, Math.round(startSec * sr))
+    const b = Math.min(this.buffer.length, Math.round(endSec * sr))
+    s.setLoop(true, a, b)
 
-    const head = this.currentFrame()
-    if (head < this.source.loopStartFrame || head >= this.source.loopEndFrame) {
-      this.seekFrame(this.source.loopStartFrame)
-    }
+    // 지금 위치가 새 구간 밖이면 A로. 재생 중에는 실제로 읽고 있는 자리(servedFrame)로 판단한다 —
+    // currentFrame()은 화면용 추정이라 ±100ms쯤 흔들려서, 루프가 막 감긴 직후엔 A 앞으로
+    // 잘못 나와 멀쩡한 재생을 A로 되돌려 버린다.
+    const head = this.playing ? s.servedFrame : this.restingFrame
+    if (head < a || head >= b) this.seekFrame(a)
   }
 
   get loopEnabled() {

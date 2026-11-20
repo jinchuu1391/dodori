@@ -23,6 +23,17 @@ export class LoopingBufferSource implements SoundSource {
   /** 루프가 아닌 상태로 파일 끝에 닿았는지 */
   ended = false
 
+  /**
+   * 필터 position → 접기 전 프레임으로 옮기는 보정값. 평소엔 0.
+   *
+   * position을 (position − A) % 구간길이 로 접기 때문에, 몇 바퀴 돈 뒤에 구간 길이가 바뀌면
+   * 같은 position이 구간 안 엉뚱한 곳으로 접힌다(재생 중 B를 옮기면 소리·헤드가 튀던 원인).
+   * 구간을 바꿀 때 "다음 position이 지금 읽던 자리(servedFrame)를 가리키도록" 이 값을 다시 잡는다.
+   */
+  private positionOffset = 0
+  /** 마지막 extract가 끝난 position — 다음 extract가 시작할 자리 */
+  private nextPosition = 0
+
   readonly buffer: AudioBuffer
   private left: Float32Array
   private right: Float32Array
@@ -39,7 +50,26 @@ export class LoopingBufferSource implements SoundSource {
     return this.loop && this.loopEndFrame - this.loopStartFrame >= MIN_LOOP_FRAMES
   }
 
-  /** 필터의 단조 증가 position을 실제 원본 프레임으로 접는다 */
+  /**
+   * 재생 중에 구간을 바꾸거나 루프를 끈다. 읽던 자리에서 끊김 없이 이어진다 —
+   * SimpleFilter를 clear()하지 않으므로 소리도 튀지 않는다.
+   * 읽던 자리가 새 구간 밖이면 어디로 갈지는 호출하는 쪽(엔진)이 seek로 정한다.
+   */
+  setLoop(loop: boolean, startFrame: number, endFrame: number) {
+    this.positionOffset = this.servedFrame - this.nextPosition
+    this.loop = loop
+    this.loopStartFrame = startFrame
+    this.loopEndFrame = endFrame
+  }
+
+  /** SimpleFilter.sourcePosition = frame 과 함께 부른다. 보정값도 비운다 */
+  seek(frame: number) {
+    this.servedFrame = frame
+    this.nextPosition = frame
+    this.positionOffset = 0
+  }
+
+  /** 접기 전 프레임(단조 증가)을 실제 원본 프레임으로 접는다 */
   mapFrame(position: number): number {
     if (!this.loopable) return position
     if (position < this.loopStartFrame) return position
@@ -52,7 +82,7 @@ export class LoopingBufferSource implements SoundSource {
     const { left, right, totalFrames } = this
     const loopable = this.loopable
     let written = 0
-    let p = position
+    let p = position + this.positionOffset
 
     // 경계(파일 끝 · 루프 끝 · 루프 시작)에 걸리면 잘라서 여러 번 복사한다
     while (written < numFrames) {
@@ -78,6 +108,7 @@ export class LoopingBufferSource implements SoundSource {
     }
 
     this.servedFrame = this.mapFrame(p)
+    this.nextPosition = position + written
     this.ended = written < numFrames && !loopable
     return written
   }

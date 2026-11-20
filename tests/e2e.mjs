@@ -278,7 +278,7 @@ async function main() {
   /* 6-1. 재생 헤드가 떨리지 않고 고르게 움직이는지 — 화면 프레임마다 위치를 재서
    *       "흐른 시간만큼 나아갔는지"의 오차를 본다. 루프 되감기(큰 역행)는 뺀다 */
   const motion = JSON.parse(await cdp.eval(`(async () => {
-    const { engine } = await import('/src/audio/engine.ts');
+    const { engine } = window.__dodori;
     const samples = [];
     await new Promise((done) => {
       const t0 = performance.now();
@@ -315,6 +315,34 @@ async function main() {
   const b = toSec(il.chips[1].replace('B ', ''))
   const cur = toSec(il.cur)
   check('재생 헤드가 A-B 구간 안에 있다', cur >= a - 0.3 && cur <= b + 0.3, `A=${a} 헤드=${cur} B=${b}`)
+
+  /* 7-1. 재생 중(한 바퀴 이상 돈 뒤) B를 옮겨도 헤드가 튀지 않는다
+   *      — 손잡이를 놓을 때와 같은 경로(setSelection commit)로 B를 바꾸고 전후 위치를 본다 */
+  const bMove = JSON.parse(await cdp.eval(`(async () => {
+    const { engine, usePlayer } = window.__dodori;
+    const frame = () => new Promise((r) => requestAnimationFrame(r));
+    const sel = usePlayer.getState().selection;
+    // 루프가 막 감긴 직후는 피한다(되감기 자체를 점프로 오인하지 않게): A+0.6초 ~ B-0.6초 사이에서
+    for (let i = 0; i < 400; i++) {
+      const p = engine.getPositionSec();
+      if (p > sel.startSec + 0.6 && p < sel.endSec - 0.6) break;
+      await frame();
+    }
+    const out = [];
+    for (let i = 0; i < 20; i++) { await frame(); out.push([performance.now(), engine.getPositionSec()]); }
+    usePlayer.getState().setSelection({ startSec: sel.startSec, endSec: sel.endSec + 1.0 }, true);
+    for (let i = 0; i < 40; i++) { await frame(); out.push([performance.now(), engine.getPositionSec()]); }
+    let worst = 0;
+    for (let i = 1; i < out.length; i++) {
+      const dt = (out[i][0] - out[i - 1][0]) / 1000;
+      worst = Math.max(worst, Math.abs(out[i][1] - out[i - 1][1] - dt));
+    }
+    // 원래 구간으로 돌려 둔다
+    usePlayer.getState().setSelection(sel, true);
+    return JSON.stringify({ worstMs: worst * 1000, before: out[19][1], after: out[20][1] });
+  })()`))
+  check('재생 중 B를 옮겨도 재생 헤드가 튀지 않는다', bMove.worstMs < 30,
+    `B 변경 직전 ${bMove.before.toFixed(2)}초 → 직후 ${bMove.after.toFixed(2)}초, 프레임당 최대 오차 ${bMove.worstMs.toFixed(0)}ms`)
 
   /* 8. 새로고침 후에도 곡과 구간이 남는지 (IndexedDB) */
   await cdp.send('Page.navigate', { url: APP })

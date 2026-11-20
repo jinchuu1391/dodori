@@ -162,4 +162,73 @@ test('루프를 A 앞에서 시작하면 A까지 읽고 구간에 진입한다',
   ])
 })
 
+/**
+ * SimpleFilter처럼 단조 증가 position으로 연달아 읽는 흉내. 다음 position을 돌려준다.
+ * 재생 중 구간을 바꾸는 상황은 "몇 바퀴 돈 뒤"에만 드러나므로 실제 호출 순서를 재현한다.
+ */
+function pump(src: LoopingBufferSource, position: number, frames: number, chunk = 300): { pos: number; left: number[] } {
+  const left: number[] = []
+  let pos = position
+  while (left.length < frames) {
+    const n = Math.min(chunk, frames - left.length)
+    const t = new Float32Array(n * 2)
+    const got = src.extract(t, n, pos)
+    left.push(...leftOf(t, got))
+    pos += got
+  }
+  return { pos, left }
+}
+
+test('재생 중(몇 바퀴 돈 뒤) B를 늘려도 읽던 자리에서 이어 읽는다', () => {
+  const src = new LoopingBufferSource(fakeBuffer(TOTAL))
+  src.setLoop(true, START, END)
+  // 2.5바퀴 돈다
+  const r1 = pump(src, START, LEN * 2 + LEN / 2)
+  const here = src.servedFrame
+  assert.equal(here, START + LEN / 2)
+
+  src.setLoop(true, START, END + 1500) // B를 늘림
+  const r2 = pump(src, r1.pos, 10)
+  assert.deepEqual(r2.left, Array.from({ length: 10 }, (_, i) => here + i), '구간을 바꿔도 끊김 없이 이어져야 한다')
+})
+
+test('재생 중(몇 바퀴 돈 뒤) B를 줄여도 아직 구간 안이면 이어 읽고, 새 B에서 A로 감긴다', () => {
+  const src = new LoopingBufferSource(fakeBuffer(TOTAL))
+  src.setLoop(true, START, END)
+  const r1 = pump(src, START, LEN * 3 + 100)
+  const here = src.servedFrame
+  assert.equal(here, START + 100)
+
+  const newEnd = START + MIN_LOOP_FRAMES + 200
+  src.setLoop(true, START, newEnd)
+  const left = pump(src, r1.pos, newEnd - here + 5).left
+  assert.equal(left[0], here)
+  assert.equal(left[newEnd - here - 1], newEnd - 1)
+  assert.equal(left[newEnd - here], START, '새 B에 닿으면 A로')
+})
+
+test('재생 중(몇 바퀴 돈 뒤) 루프를 꺼도 읽던 자리에서 이어 앞으로 읽는다', () => {
+  const src = new LoopingBufferSource(fakeBuffer(TOTAL))
+  src.setLoop(true, START, END)
+  const r1 = pump(src, START, LEN * 2 + 700)
+  const here = src.servedFrame
+
+  src.setLoop(false, START, END)
+  const left = pump(src, r1.pos, LEN).left
+  assert.deepEqual(left.slice(0, 3), [here, here + 1, here + 2])
+  assert.equal(left[LEN - 1], here + LEN - 1, 'B를 지나 계속 앞으로')
+})
+
+test('seek 하면 기준이 새로 잡혀 그 프레임부터 읽는다', () => {
+  const src = new LoopingBufferSource(fakeBuffer(TOTAL))
+  src.setLoop(true, START, END)
+  pump(src, START, LEN * 2 + 300)
+  src.setLoop(true, START, END + 500)
+
+  // SimpleFilter.sourcePosition = f 와 함께 불린다
+  src.seek(START + 42)
+  const left = pump(src, START + 42, 3).left
+  assert.deepEqual(left, [START + 42, START + 43, START + 44])
+})
+
 console.log(`\n${passed} passed`)

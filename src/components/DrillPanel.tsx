@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { usePlayer } from '../store/usePlayer'
 import { formatTime } from '../util/time'
+import { Metronome } from './Metronome'
 
 /**
- * M1의 드릴 패널은 "구간을 정하고 루프를 켠다"까지다.
- * 반복 횟수 · 반복 간격 · 점진적 속도 · 카운트인 · 메트로놈은 M2.
+ * 드릴 패널 — 구간을 정하고 루프를 켜고, 메트로놈을 맞춘다.
+ * 반복 횟수 · 반복 간격 · 점진적 속도 · 카운트인은 M2.
  */
 export function DrillPanel() {
   const buffer = usePlayer((s) => s.buffer)
@@ -76,11 +77,12 @@ export function DrillPanel() {
           />
           <span>구간 반복</span>
         </label>
-
       </div>
 
+      <Metronome />
+
       <p className="drill-note">
-        반복 횟수 · 반복 간격 · 점진적 속도 · 카운트인 · 메트로놈은 <b>M2</b>에서 붙습니다.
+        반복 횟수 · 반복 간격 · 점진적 속도 · 카운트인은 <b>M2</b>에서 붙습니다.
       </p>
     </div>
   )

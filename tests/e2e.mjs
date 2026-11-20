@@ -303,6 +303,31 @@ async function main() {
   check('재생 헤드가 떨리지 않고 고르게 움직인다', motion.worstMs < 8 && motion.back === 0,
     `최대 ${motion.worstMs.toFixed(1)}ms, 역행 ${motion.back}회 (기준: 8ms 미만, 역행 0)`)
 
+  /* 6-2. 재생 ↔ 일시정지를 여러 번 반복해도 다시 재생하면 소리가 난다
+   *      — 엔진 분석기로 실제 출력 샘플을 읽어 무음·NaN이 아닌지 본다 */
+  const audible = JSON.parse(await cdp.eval(`(async () => {
+    const { engine, usePlayer } = window.__dodori;
+    const an = engine.getAnalyser();
+    const buf = new Float32Array(an.fftSize);
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const level = () => { an.getFloatTimeDomainData(buf); let m = 0, nan = 0;
+      for (const v of buf) { if (Number.isNaN(v)) nan++; else m = Math.max(m, Math.abs(v)); } return { m, nan }; };
+    const rounds = [];
+    for (let i = 0; i < 6; i++) {
+      // 매번 다른 시점에 일시정지 — 위치 추정값이 정수가 아닌 순간이 대부분이다
+      await wait(173 + i * 61);
+      await usePlayer.getState().togglePlay(); // 일시정지
+      await wait(120);
+      await usePlayer.getState().togglePlay(); // 다시 재생
+      await wait(450);
+      rounds.push(level());
+    }
+    return JSON.stringify(rounds);
+  })()`))
+  const silent = audible.filter((r) => r.m < 0.01 || r.nan > 0).length
+  check('재생·일시정지를 반복해도 다시 재생하면 소리가 난다', silent === 0,
+    `6번 중 무음 ${silent}번 · 최대 진폭 ${audible.map((r) => r.m.toFixed(2)).join(' ')}${audible.some((r) => r.nan) ? ' · NaN 섞임' : ''}`)
+
   /* 7. 루프가 A-B 안에 머무는지 */
   const inLoop = await cdp.eval(`(() => {
     const cur = document.querySelector('.now .cur').textContent;
@@ -526,6 +551,147 @@ async function main() {
   await sleep(3000)
   const h2 = await stageH()
   check('파형 높이를 새로고침 후에도 기억한다', Math.abs(h2 - h1) < 2, `${Math.round(h2)}px`)
+
+  /* 11. 메트로놈 */
+  const key = async (k, code, vk) => {
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: k, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk })
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: k, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk })
+  }
+  const metro = () => cdp.eval(`JSON.stringify({
+    grid: window.__dodori.usePlayer.getState().beatGrid,
+    on: window.__dodori.usePlayer.getState().metronomeOn,
+    clicks: window.__dodori.engine.clickCount,
+    anchorText: document.querySelector('.metro-anchor-time')?.textContent,
+    hint: document.querySelector('.metro .hint')?.textContent,
+  })`).then(JSON.parse)
+  const clickBtn = (sel, shift = false) => cdp.eval(`document.querySelector('${sel}').dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: ${shift} }))`)
+
+  const m0 = await metro()
+  check('메트로놈은 처음에 꺼져 있고 박 기준이 없다', !m0.on && m0.grid === null && /첫 박 찍기/.test(m0.hint ?? ''), m0.hint)
+
+  // 재생하며 T를 한 번 → 그 순간 위치가 1박, BPM은 기본 120
+  await cdp.eval(`window.__dodori.usePlayer.getState().seek(0)`)
+  await key(' ', 'Space', 32)
+  await sleep(1200)
+  const posAtTap = await cdp.eval(`window.__dodori.engine.getPositionSec()`)
+  await key('t', 'KeyT', 84)
+  await sleep(100)
+  const m1 = await metro()
+  check('T 한 번으로 지금 위치가 첫 박이 된다', m1.grid && Math.abs(m1.grid.anchorSec - posAtTap) < 0.1 && m1.grid.bpm === 120,
+    `첫 박 ${m1.grid?.anchorSec.toFixed(3)}초 (누를 때 ${posAtTap.toFixed(3)}초) · ${m1.grid?.bpm} BPM · 표시 ${m1.anchorText}`)
+
+  // BPM −/+ 는 1씩, 첫 박은 그대로
+  await clickBtn('.metro-bpm button[aria-label="BPM 1 올리기"]')
+  await clickBtn('.metro-bpm button[aria-label="BPM 1 올리기"]')
+  await clickBtn('.metro-bpm button[aria-label="BPM 1 내리기"]')
+  await sleep(100)
+  const m1b = await metro()
+  check('BPM −/+ 로 1씩 바뀌고 첫 박은 그대로', m1b.grid.bpm === 121 && m1b.grid.anchorSec === m1.grid.anchorSec, `${m1b.grid.bpm} BPM`)
+
+  // 첫 박 ◀ ▶ : 10ms, Shift 1ms
+  await clickBtn('.metro-anchor button[aria-label="첫 박 뒤로"]')
+  await clickBtn('.metro-anchor button[aria-label="첫 박 뒤로"]')
+  await clickBtn('.metro-anchor button[aria-label="첫 박 앞으로"]', true)
+  await sleep(100)
+  const m1c = await metro()
+  const nudged = m1c.grid.anchorSec - m1b.grid.anchorSec
+  check('첫 박을 10ms(Shift 1ms)씩 옮길 수 있다', Math.abs(nudged - 0.019) < 0.0002, `+10 +10 −1 = ${(nudged * 1000).toFixed(1)}ms · 표시 ${m1c.anchorText}`)
+
+  // 결정적인 값으로: 60 BPM, 0.5초가 1박 → 1초에 한 번
+  await cdp.eval(`window.__dodori.usePlayer.getState().setBeatGrid({ bpm: 60, anchorSec: 0.5, beatsPerBar: 4 })`)
+  await cdp.eval(`document.querySelector('.metro .toggle input').click()`)
+  await cdp.eval(`window.__dodori.usePlayer.getState().seek(0.2)`)
+  await sleep(200)
+  const c0 = (await metro()).clicks
+  await sleep(3000)
+  const c1 = (await metro()).clicks
+  check('메트로놈을 켜면 BPM대로 클릭한다', c1 - c0 >= 2 && c1 - c0 <= 4, `3초에 ${c1 - c0}번 (60 BPM → 3번 기대)`)
+
+  await cdp.eval(`window.__dodori.usePlayer.getState().setSpeed(0.5)`)
+  await sleep(300)
+  const c2 = (await metro()).clicks
+  await sleep(4000)
+  const c3 = (await metro()).clicks
+  check('느리게 재생하면 클릭도 느려진다', c3 - c2 >= 1 && c3 - c2 <= 3, `0.5×에서 4초에 ${c3 - c2}번 (2번 기대)`)
+  const slowHint = (await metro()).hint
+  check('느린 속도에선 정확도 안내가 보인다', /어긋날 수/.test(slowHint ?? ''), slowHint)
+  await cdp.eval(`window.__dodori.usePlayer.getState().setSpeed(1)`)
+  await key(' ', 'Space', 32) // 정지
+  await sleep(300)
+
+  // 박자 선(1.5초, 마디 둘째 박) 끌기 → 격자 전체가 옮겨진다. 화면 이동·구간 선택은 일어나지 않는다
+  const mb = JSON.parse(await cdp.eval(`(() => { const el = document.querySelector('.wave-wrap'); const r = el.getBoundingClientRect();
+    return JSON.stringify({ x: r.left, y: r.top, w: r.width, h: r.height, vs: +el.dataset.viewStart, vspan: +el.dataset.viewSpan }); })()`))
+  const lineX = mb.x + ((1.5 - mb.vs) / mb.vspan) * mb.w
+  const selBefore = await cdp.eval(`JSON.stringify(window.__dodori.usePlayer.getState().selection)`)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: lineX, y: mb.y + mb.h * 0.6, button: 'left', clickCount: 1, pointerType: 'mouse' })
+  for (let i = 1; i <= 8; i++) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: lineX + 5 * i, y: mb.y + mb.h * 0.6, button: 'left', pointerType: 'mouse' })
+    await sleep(20)
+  }
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: lineX + 40, y: mb.y + mb.h * 0.6, button: 'left', clickCount: 1, pointerType: 'mouse' })
+  await sleep(300)
+  const m2 = await metro()
+  const vAfter = await viewOf()
+  const expShift = (40 / mb.w) * mb.vspan
+  check('박자 선을 끌면 첫 박이 옮겨진다', Math.abs(m2.grid.anchorSec - (0.5 + expShift)) < 0.02,
+    `기준 0.5 → ${m2.grid.anchorSec.toFixed(3)}초 (기대 ${(0.5 + expShift).toFixed(3)})`)
+  check('박자 선 드래그는 화면 이동·구간 선택을 하지 않는다',
+    Math.abs(vAfter.start - mb.vs) < 1e-3 && (await cdp.eval(`JSON.stringify(window.__dodori.usePlayer.getState().selection)`)) === selBefore,
+    `화면 시작 ${vAfter.start}`)
+
+  // 확대해도 박자 선이 파형 위에 보인다 — 선 자리와 바로 옆의 픽셀 색을 비교한다
+  // (헤드리스 Chrome은 위 키 입력 중 어딘가에서 페이지를 hidden으로 돌려 화면 프레임을 멈춘다.
+  //  그러면 마우스·휠 입력이 프레임을 기다리다 시간 초과가 나므로 다시 앞으로 가져온다)
+  await cdp.send('Page.bringToFront')
+  await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true })
+  await sleep(200)
+  const beatSec = m2.grid.anchorSec + 2 // 2박 뒤
+  const bx0 = mb.x + ((beatSec - mb.vs) / mb.vspan) * mb.w
+  for (let i = 0; i < 3; i++) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: bx0, y: mb.y + mb.h * 0.5, deltaX: 0, deltaY: -250 })
+    await sleep(60)
+  }
+  await sleep(300)
+  const zv = await viewOf()
+  const beatVis = JSON.parse(await cdp.eval(`(() => {
+    const c = document.querySelector('.wave-wrap canvas');
+    const rect = c.getBoundingClientRect();
+    const dpr = c.width / rect.width;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const x = Math.round(((${beatSec} - ${zv.start}) / ${zv.span}) * rect.width);
+    // 파형 진한 띠가 있는 가운데 높이에서, 열 cx의 픽셀이 열 ref와 눈에 띄게 다른 비율(색과 무관)
+    const differs = (cx, ref) => { let n = 0, t = 0; const a = Math.round(cx * dpr), b = Math.round(ref * dpr);
+      for (let y = Math.round(c.height * 0.4); y < Math.round(c.height * 0.6); y++) {
+        const o = (y * c.width + a) * 4, q = (y * c.width + b) * 4; t++;
+        if (Math.abs(d[o] - d[q]) + Math.abs(d[o + 1] - d[q + 1]) + Math.abs(d[o + 2] - d[q + 2]) > 40) n++; }
+      return n / t; };
+    // 선 자리 vs 6px 옆, 그리고 대조로 선 없는 두 열(6px 옆 vs 12px 옆)
+    return JSON.stringify({ on: differs(x, x + 6), beside: differs(x + 6, x + 12), zoom: (8 / ${zv.span}).toFixed(1) });
+  })()`))
+  check('확대해도 박자 선이 파형 위에 보인다', beatVis.on > 0.8 && beatVis.beside < 0.1,
+    `${beatVis.zoom}× 확대 · 선 자리가 옆과 다른 픽셀 ${(beatVis.on * 100).toFixed(0)}% (선 없는 두 열끼리는 ${(beatVis.beside * 100).toFixed(0)}%)`)
+  await cdp.send('Page.captureScreenshot', { format: 'png' })
+    .then((r) => writeFileSync(SHOT.replace(/\.png$/, '-beatzoom.png'), Buffer.from(r.data, 'base64')))
+  await cdp.eval(`document.querySelector('.wave-fit')?.click()`)
+  await sleep(200)
+
+  // 구간에 저장한 박 격자는 새로고침 후 그 구간을 고르면 돌아온다
+  await cdp.eval(`window.__dodori.usePlayer.getState().setSelection({ startSec: 5.2, endSec: 7.1 })`)
+  await sleep(100)
+  await cdp.eval(`window.__dodori.usePlayer.getState().setBeatGrid({ bpm: 96.5, anchorSec: 5.31, beatsPerBar: 3 })`)
+  await cdp.eval(`window.__dodori.usePlayer.getState().saveSelectionAsRegion('박자 구간')`)
+  await sleep(500)
+  await cdp.send('Page.navigate', { url: APP })
+  await sleep(3000)
+  await cdp.eval(`[...document.querySelectorAll('.regions li')].find(li => li.textContent.includes('박자 구간')).querySelector('.go').click()`)
+  await sleep(300)
+  const m3 = await metro()
+  check('구간에 저장한 박 설정이 새로고침 후에도 돌아온다',
+    m3.grid && m3.grid.bpm === 96.5 && Math.abs(m3.grid.anchorSec - 5.31) < 1e-6 && m3.grid.beatsPerBar === 3, JSON.stringify(m3.grid))
+
+  await cdp.send('Page.captureScreenshot', { format: 'png' })
+    .then((r) => writeFileSync(SHOT.replace(/\.png$/, '-metro.png'), Buffer.from(r.data, 'base64')))
 
   /* 콘솔 에러 */
   const noise = cdp.consoleErrors.filter((e) => !/DevTools|favicon|AudioContext was not allowed/.test(e))

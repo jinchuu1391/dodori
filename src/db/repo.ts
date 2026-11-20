@@ -1,5 +1,5 @@
 import { db } from './db'
-import type { DrillSettings, PracticeSession, Region, Song } from '../types'
+import type { BeatGrid, DrillSettings, PracticeSession, Region, Song } from '../types'
 
 /**
  * 저장소 경계. 컴포넌트는 Dexie를 직접 만지지 않는다.
@@ -61,6 +61,7 @@ export async function addRegion(input: {
   startSec: number
   endSec: number
   drill?: DrillSettings
+  beatGrid?: BeatGrid
 }): Promise<Region> {
   const region: Region = { ...input, id: uid(), updatedAt: now() }
   await db.regions.add(region)

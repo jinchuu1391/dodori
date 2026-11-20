@@ -30,6 +30,11 @@ export default function App() {
         void togglePlay()
       } else if (e.key === 'l' || e.key === 'L') {
         setLoopEnabled(!loopEnabled)
+      } else if (e.key === 't' || e.key === 'T') {
+        usePlayer.getState().markBeat()
+      } else if (e.key === 'm' || e.key === 'M') {
+        const s = usePlayer.getState()
+        s.setMetronomeOn(!s.metronomeOn)
       }
     }
     window.addEventListener('keydown', onKey)

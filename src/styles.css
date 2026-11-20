@@ -11,6 +11,8 @@
   --accent-weak: rgba(11, 124, 110, 0.1);
   --loop: #c0741b;
   --loop-weak: rgba(217, 140, 52, 0.16);
+  /* 박자 선 — 흰 바탕과 청록 파형 양쪽에서 보이는 색 */
+  --beat: #5b4fd6;
   --danger: #b3261e;
   --radius: 10px;
   --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
@@ -29,6 +31,7 @@
     --accent-weak: rgba(46, 196, 172, 0.12);
     --loop: #e5a24a;
     --loop-weak: rgba(229, 162, 74, 0.16);
+    --beat: #b3a8ff;
     --danger: #f2857c;
   }
 }
@@ -59,7 +62,9 @@ button:disabled {
   opacity: 0.4;
   cursor: default;
 }
-input[type='text'] {
+input[type='text'],
+input[type='number'],
+select {
   font: inherit;
   color: inherit;
   background: var(--ground);
@@ -632,4 +637,85 @@ h3 {
 .wave-fit:hover {
   color: var(--accent);
   border-color: var(--accent);
+}
+
+/* ---------- 메트로놈 ---------- */
+.metro {
+  gap: 10px;
+}
+.metro .toggle input {
+  accent-color: var(--accent);
+}
+.metro-bpm,
+.metro-anchor {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.metro-bpm .unit {
+  margin-left: 2px;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--faint);
+}
+.metro-bpm input {
+  width: 64px;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  text-align: center;
+}
+.metro-bpm button,
+.metro-anchor button {
+  width: 26px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.metro-bpm button:hover:not(:disabled),
+.metro-anchor button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.metro-anchor-time {
+  min-width: 70px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+}
+.metro-bar {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+.metro-mark {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  color: var(--accent);
+}
+.metro-mark:hover:not(:disabled) {
+  background: var(--accent-weak);
+}
+.metro-vol {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: var(--faint);
+}
+.metro-vol input {
+  width: 80px;
+}
+/* −/+ 버튼이 있으니 숫자칸 기본 화살표는 숨긴다(자리를 차지해 96.5가 잘린다) */
+.metro-bpm input::-webkit-outer-spin-button,
+.metro-bpm input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.metro-bpm input {
+  -moz-appearance: textfield;
+  appearance: textfield;
 }

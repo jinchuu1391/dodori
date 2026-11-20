@@ -50,6 +50,8 @@ export interface Region {
   endSec: number
   color?: string
   drill?: DrillSettings
+  /** 이 구간의 박자 격자(메트로놈). 없으면 직전에 쓰던 격자를 이어 쓴다 */
+  beatGrid?: BeatGrid
   updatedAt: number
   /** tombstone — 삭제도 동기화되어야 한다 */
   deletedAt?: number
@@ -77,3 +79,15 @@ export const SPEED_MIN = 0.5
 export const SPEED_MAX = 1.25
 export const PITCH_MIN = -6
 export const PITCH_MAX = 6
+
+/**
+ * 박자 격자 — 메트로놈 클릭과 파형 위 박자 눈금의 기준. 곡의 시간축에 고정된다.
+ * anchorSec은 아무 박 하나(그 박이 1박). 구간 반복 시작점 A와는 무관하다.
+ * 템포가 바뀌는 곡은 구간(Region)마다 따로 둔다.
+ */
+export interface BeatGrid {
+  bpm: number
+  anchorSec: number
+  /** 한 마디 박 수 — 1박에 강박 클릭 */
+  beatsPerBar: number
+}

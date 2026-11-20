@@ -1,5 +1,8 @@
-import { SimpleFilter, SoundTouch, getWebAudioNode } from 'soundtouchjs'
+import { SimpleFilter, SoundTouch } from 'soundtouchjs'
+import type { BeatGrid } from '../types'
 import { LoopingBufferSource } from './loopSource'
+import { ClickMixer } from './metronome'
+import { measureStretchOffset } from './stretchOffset'
 
 /**
  * ScriptProcessor 블록 크기. 크면 글리치에 강하고 작으면 반응이 빠르다.
@@ -52,6 +55,21 @@ export class AudioEngine {
 
   private playing = false
   private tempo = 1
+  private pitch = 0
+
+  /*
+   * 메트로놈. 출력 샘플 n에서 들리는 원본 위치를 "seek한 position + tempo·n + stretchOffset"으로
+   * 계산해 박을 찾는다(stretchOffset.ts 참고). 속도·키를 바꾸면 지금 위치에서 이어지게 다시 잡는다.
+   */
+  private mixer: ClickMixer | null = null
+  private metronomeOn = false
+  private clickP0 = 0
+  private clickOut = 0
+  /** 이 position보다 앞(= seek 직후 SoundTouch가 아직 소리를 못 낸 구간)은 클릭하지 않는다 */
+  private clickGuard = 0
+  private stretchOffset = 0
+  private stretchOffsetStale = true
+  private readonly clickFrames = new Float64Array(BUFFER_SIZE)
 
   /** 마지막 audioprocess 시점의 (컨텍스트 시각, 소스 프레임) — 사이를 보간해서 헤드를 그린다 */
   private anchorCtxTime = 0
@@ -100,16 +118,33 @@ export class AudioEngine {
     soundTouch.tempo = this.tempo
     const filter = new SimpleFilter(source, soundTouch, () => this.handleEnded())
 
-    const node = getWebAudioNode(
-      ctx,
-      filter,
-      () => {
-        // 오디오 콜백마다 앵커 갱신. 사이 프레임은 ctx.currentTime으로 보간한다
-        this.anchorCtxTime = ctx.currentTime
-        this.anchorFrame = source.servedFrame
-      },
-      BUFFER_SIZE,
-    )
+    // soundtouchjs의 getWebAudioNode와 같은 일 + 메트로놈 클릭을 출력 단에서 섞는다
+    const node = ctx.createScriptProcessor(BUFFER_SIZE, 2, 2)
+    const samples = new Float32Array(BUFFER_SIZE * 2)
+    node.onaudioprocess = (e) => {
+      const left = e.outputBuffer.getChannelData(0)
+      const right = e.outputBuffer.getChannelData(1)
+      const n = filter.extract(samples, BUFFER_SIZE)
+      // 오디오 콜백마다 앵커 갱신. 사이 프레임은 ctx.currentTime으로 보간한다
+      this.anchorCtxTime = ctx.currentTime
+      this.anchorFrame = source.servedFrame
+      if (n === 0) filter.onEnd()
+      for (let i = 0; i < n; i++) {
+        left[i] = samples[i * 2]
+        right[i] = samples[i * 2 + 1]
+      }
+      left.fill(0, n)
+      right.fill(0, n)
+      this.mixClicks(left, right, n)
+      this.clickOut += n
+    }
+    this.mixer = new ClickMixer(ctx.sampleRate, buffer.sampleRate)
+    this.mixer.grid = this.pendingGrid
+    this.mixer.volume = this.pendingClickVolume
+    this.clickP0 = 0
+    this.clickOut = 0
+    this.clickGuard = 0
+    this.stretchOffsetStale = true
 
     this.buffer = buffer
     this.source = source
@@ -130,6 +165,7 @@ export class AudioEngine {
     this.soundTouch = null
     this.source = null
     this.buffer = null
+    this.mixer = null
     this.playing = false
     this.restingFrame = 0
     this.smooth = null
@@ -193,7 +229,9 @@ export class AudioEngine {
 
   private seekFrame(frame: number) {
     if (!this.filter || !this.buffer || !this.source) return
-    const clamped = Math.max(0, Math.min(frame, this.buffer.length - 1))
+    // 반드시 정수로. 일시정지는 소수인 추정 위치(currentFrame)로 되돌아오는데, 소수 position이면
+    // 소스가 left[52341.73]처럼 읽어 NaN이 SoundTouch에 들어가고, 다음 seek까지 출력 전체가 NaN(무음)이 된다
+    const clamped = Math.max(0, Math.min(Math.round(frame), this.buffer.length - 1))
     // sourcePosition 대입은 내부 파이프를 clear한다 = 진짜 seek
     this.filter.sourcePosition = clamped
     this.source.seek(clamped)
@@ -201,6 +239,11 @@ export class AudioEngine {
     this.anchorFrame = clamped
     this.smooth = null
     if (this.ctx) this.anchorCtxTime = this.ctx.currentTime
+    // 필터가 비워졌으니 클릭 시계도 여기서 다시 센다
+    this.clickP0 = clamped
+    this.clickOut = 0
+    this.clickGuard = clamped
+    this.mixer?.reset()
   }
 
   /* ---------- 구간 루프 ---------- */
@@ -233,12 +276,84 @@ export class AudioEngine {
   /* ---------- 속도 · 키 ---------- */
 
   setSpeed(speed: number) {
-    this.tempo = speed
-    if (this.soundTouch) this.soundTouch.tempo = speed
+    this.reanchorClicks(() => {
+      this.tempo = speed
+      if (this.soundTouch) this.soundTouch.tempo = speed
+    })
   }
 
   setPitchSemitones(semitones: number) {
-    if (this.soundTouch) this.soundTouch.pitchSemitones = semitones
+    this.reanchorClicks(() => {
+      this.pitch = semitones
+      if (this.soundTouch) this.soundTouch.pitchSemitones = semitones
+    })
+  }
+
+  /* ---------- 메트로놈 ---------- */
+
+  private pendingGrid: BeatGrid | null = null
+  private pendingClickVolume = 0.8
+
+  /** grid가 null이면 박이 없으니 켜져 있어도 치지 않는다 */
+  setMetronome(on: boolean, grid: BeatGrid | null) {
+    this.metronomeOn = on
+    this.pendingGrid = grid
+    if (this.mixer) this.mixer.grid = grid
+  }
+
+  setMetronomeVolume(v: number) {
+    this.pendingClickVolume = v
+    if (this.mixer) this.mixer.volume = v
+  }
+
+  /** 지금까지 친 클릭 수 — 테스트용 */
+  get clickCount(): number {
+    return this.mixer?.clickCount ?? 0
+  }
+
+  /**
+   * 속도·키 변경. 지금 들리는 위치에서 클릭 시계가 끊기지 않게 새 기울기·보정값으로 다시 잡는다.
+   * (SoundTouch 안에 이미 들어 있는 소리는 예전 설정으로 만든 것이라 잠깐은 몇 ms 어긋날 수 있다)
+   */
+  private reanchorClicks(change: () => void) {
+    const before = this.clickP0 + this.tempo * this.clickOut + this.stretchOffset
+    change()
+    this.stretchOffsetStale = true
+    // 꺼져 있으면 재는 비용은 아끼되, 시계는 항상 새 속도로 다시 잡는다
+    // (안 그러면 예전 속도로 센 clickOut에 새 속도를 곱하게 된다)
+    if (this.metronomeOn) this.refreshStretchOffset()
+    this.clickP0 = before - this.stretchOffset
+    this.clickOut = 0
+  }
+
+  /** 속도·키에 맞는 SoundTouch 지연을 잰다(캐시됨, 처음엔 십수 ms) */
+  private refreshStretchOffset() {
+    if (!this.stretchOffsetStale || !this.buffer) return
+    this.stretchOffset = measureStretchOffset(this.tempo, this.pitch, this.buffer.sampleRate)
+    this.stretchOffsetStale = false
+  }
+
+  private mixClicks(left: Float32Array, right: Float32Array, n: number) {
+    const mixer = this.mixer
+    const source = this.source
+    if (!mixer || !source || !this.buffer || !this.metronomeOn || !mixer.grid) return
+    if (this.stretchOffsetStale) {
+      // 오디오 콜백 안에서 재는 건 피하고 싶지만, 켜자마자 한 번뿐이다(캐시)
+      const before = this.clickP0 + this.tempo * this.clickOut + this.stretchOffset
+      this.refreshStretchOffset()
+      if (this.clickOut > 0) {
+        this.clickP0 = before - this.stretchOffset
+        this.clickOut = 0
+      }
+    }
+    const frames = this.clickFrames
+    const len = this.buffer.length
+    for (let i = 0; i < n; i++) {
+      const fp = this.clickP0 + this.tempo * (this.clickOut + i) + this.stretchOffset
+      const f = fp < this.clickGuard ? NaN : source.frameAtPosition(fp)
+      frames[i] = f >= len ? NaN : f
+    }
+    mixer.mix(left, right, frames, n)
   }
 
   setVolume(v: number) {

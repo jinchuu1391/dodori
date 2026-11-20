@@ -3,11 +3,16 @@ import { engine } from '../audio/engine'
 import { type WaveLevels, buildWaveLevels } from '../audio/peaks'
 import { sha256Hex } from '../audio/hash'
 import * as repo from '../db/repo'
-import type { Region, Song } from '../types'
+import type { BeatGrid, Region, Song } from '../types'
 import { PITCH_MAX, PITCH_MIN, SPEED_MAX, SPEED_MIN } from '../types'
 import { clamp } from '../util/time'
 
 const LAST_SONG_KEY = 'dodori:lastSongId'
+
+/** 첫 박을 찍을 때 BPM을 아직 안 정했으면 이걸로 시작한다 */
+export const DEFAULT_BPM = 120
+export const BPM_MIN = 30
+export const BPM_MAX = 300
 
 /** StrictMode가 개발 중 effect를 두 번 돌린다. 곡을 두 번 디코딩하지 않도록 막는다 */
 let initStarted = false
@@ -56,6 +61,20 @@ interface PlayerState {
   setSpeed: (v: number) => void
   setPitch: (v: number) => void
   setVolume: (v: number) => void
+
+  /** 지금 쓰는 박자 격자. 구간을 고르면 그 구간 것으로, 새 구간은 이걸 물려받는다 */
+  beatGrid: BeatGrid | null
+  metronomeOn: boolean
+  metronomeVolume: number
+  /**
+   * commit=false면 화면·소리만 바꾸고 저장하지 않는다(박자 선 드래그 중).
+   * 고른 북마크가 있으면 그 구간에 저장한다.
+   */
+  setBeatGrid: (grid: BeatGrid | null, commit?: boolean) => void
+  setMetronomeOn: (on: boolean) => void
+  setMetronomeVolume: (v: number) => void
+  /** 지금 위치를 1박으로 찍는다. BPM·박자는 쓰던 값(없으면 DEFAULT_BPM, 4/4) */
+  markBeat: () => void
 }
 
 export const usePlayer = create<PlayerState>()((set, get) => {
@@ -64,6 +83,11 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     const { selection, loopEnabled } = get()
     if (loopEnabled && selection) engine.setLoop(selection.startSec, selection.endSec)
     else engine.setLoop(null, null)
+  }
+
+  const syncMetronome = () => {
+    const { metronomeOn, beatGrid } = get()
+    engine.setMetronome(metronomeOn, beatGrid)
   }
 
   const refreshStorage = async () => {
@@ -83,6 +107,9 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     speed: 1,
     pitchSemitones: 0,
     volume: 1,
+    beatGrid: null,
+    metronomeOn: false,
+    metronomeVolume: 0.8,
     status: null,
     error: null,
     storage: null,
@@ -151,13 +178,18 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       }
 
       engine.pause()
-      set({ status: '불러오는 중…', error: null, isPlaying: false, selection: null, activeRegionId: null })
+      set({
+        status: '불러오는 중…', error: null, isPlaying: false, selection: null, activeRegionId: null,
+        beatGrid: null,
+      })
 
       try {
         const buffer = await engine.decode(await song.fileBlob.arrayBuffer())
         engine.load(buffer)
         engine.setSpeed(get().speed)
         engine.setPitchSemitones(get().pitchSemitones)
+        engine.setMetronomeVolume(get().metronomeVolume)
+        syncMetronome()
 
         const levels = buildWaveLevels(buffer)
 
@@ -192,13 +224,14 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     },
 
     async saveSelectionAsRegion(label) {
-      const { song, selection } = get()
+      const { song, selection, beatGrid } = get()
       if (!song || !selection) return
       const region = await repo.addRegion({
         songId: song.id,
         label: label.trim() || '새 구간',
         startSec: selection.startSec,
         endSec: selection.endSec,
+        ...(beatGrid ? { beatGrid } : {}),
       })
       set({ regions: await repo.listRegions(song.id), activeRegionId: region.id })
     },
@@ -207,6 +240,11 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       const region = get().regions.find((r) => r.id === id)
       if (!region) return
       set({ selection: { startSec: region.startSec, endSec: region.endSec }, activeRegionId: id })
+      // 구간에 박 격자가 있으면 그걸로, 없으면 쓰던 격자를 그대로(템포가 일정한 곡은 한 번만 맞추면 된다)
+      if (region.beatGrid) {
+        set({ beatGrid: region.beatGrid })
+        syncMetronome()
+      }
       syncLoop()
       engine.seekSec(region.startSec)
     },
@@ -247,6 +285,38 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       const speed = clamp(Number(v.toFixed(2)), SPEED_MIN, SPEED_MAX)
       engine.setSpeed(speed)
       set({ speed })
+    },
+
+    setBeatGrid(grid, commit = true) {
+      set({ beatGrid: grid })
+      syncMetronome()
+      if (!commit) return
+      const { activeRegionId, song } = get()
+      if (!activeRegionId || !song) return
+      // 고른 북마크의 격자를 고친 것 — 그 구간에 저장(화면 목록도 바로 반영)
+      set({ regions: get().regions.map((r) => (r.id === activeRegionId ? { ...r, beatGrid: grid ?? undefined } : r)) })
+      void repo.updateRegion(activeRegionId, { beatGrid: grid ?? undefined })
+    },
+
+    setMetronomeOn(on) {
+      set({ metronomeOn: on })
+      syncMetronome()
+    },
+
+    setMetronomeVolume(v) {
+      const metronomeVolume = clamp(v, 0, 1)
+      engine.setMetronomeVolume(metronomeVolume)
+      set({ metronomeVolume })
+    },
+
+    markBeat() {
+      if (!engine.isLoaded) return
+      const g = get().beatGrid
+      get().setBeatGrid({
+        bpm: g?.bpm ?? DEFAULT_BPM,
+        anchorSec: engine.getPositionSec(),
+        beatsPerBar: g?.beatsPerBar ?? 4,
+      })
     },
 
     setPitch(v) {

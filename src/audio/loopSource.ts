@@ -69,6 +69,14 @@ export class LoopingBufferSource implements SoundSource {
     this.positionOffset = 0
   }
 
+  /**
+   * 필터 position(소수 가능)이 가리키는 원본 프레임. 메트로놈이 "지금 들리는 곳"을 알 때 쓴다.
+   * setLoop의 보정값까지 반영하므로 extract가 읽은 자리와 같은 곳을 가리킨다.
+   */
+  frameAtPosition(position: number): number {
+    return this.mapFrame(position + this.positionOffset)
+  }
+
   /** 접기 전 프레임(단조 증가)을 실제 원본 프레임으로 접는다 */
   mapFrame(position: number): number {
     if (!this.loopable) return position
@@ -82,7 +90,9 @@ export class LoopingBufferSource implements SoundSource {
     const { left, right, totalFrames } = this
     const loopable = this.loopable
     let written = 0
-    let p = position + this.positionOffset
+    // 소수 position이 들어오면 left[52341.73] = undefined → NaN이 SoundTouch를 오염시켜 무음이 된다.
+    // 엔진은 정수로 seek하지만, 혹시 새는 경로가 있어도 여기서 막는다
+    let p = Math.floor(position + this.positionOffset)
 
     // 경계(파일 끝 · 루프 끝 · 루프 시작)에 걸리면 잘라서 여러 번 복사한다
     while (written < numFrames) {

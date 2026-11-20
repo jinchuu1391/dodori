@@ -231,4 +231,13 @@ test('seek 하면 기준이 새로 잡혀 그 프레임부터 읽는다', () => 
   assert.deepEqual(left, [START + 42, START + 43, START + 44])
 })
 
+test('소수 position이 들어와도 NaN 없이 정수 프레임을 읽는다 (무음 버그 방지)', () => {
+  const src = new LoopingBufferSource(fakeBuffer(TOTAL))
+  const target = new Float32Array(4 * 2)
+  const n = src.extract(target, 4, 123.73)
+  assert.equal(n, 4)
+  assert.ok(Array.from(target).every((v) => !Number.isNaN(v)), 'NaN이 섞이면 안 된다')
+  assert.deepEqual(leftOf(target, 4), [123, 124, 125, 126])
+})
+
 console.log(`\n${passed} passed`)

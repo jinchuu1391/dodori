@@ -3,6 +3,7 @@ import { engine } from '../audio/engine'
 import { columnLevels } from '../audio/peaks'
 import { usePlayer } from '../store/usePlayer'
 import { formatTime } from '../util/time'
+import type { BeatGrid } from '../types'
 
 const HANDLE_HIT_PX = 9
 const DRAG_THRESHOLD_PX = 3
@@ -29,18 +30,28 @@ function clampView(start: number, span: number, duration: number): View {
 /** 화면 폭에 눈금이 targetTicks개 안쪽으로 들어가는 가장 촘촘한 간격 */
 const TICK_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300]
 
+/** 박자 선 간격이 이보다 좁으면 그리지 않는다(마디 선만, 그것도 좁으면 생략) */
+const BEAT_LINE_MIN_PX = 4
+/** 박자 선 간격이 이만큼은 돼야 끌어 잡을 수 있다 — 좁으면 화면 이동과 겹친다 */
+const BEAT_GRAB_MIN_PX = 14
+const BEAT_HIT_PX = 5
+
 /**
  * new  : 눈금 띠 드래그 → 새 A-B 구간
  * start/end : A·B 경계선 근처(위아래 어디든) 드래그 → 경계 조정
+ * beat : 파형 영역의 박자 선 드래그 → 박 격자 전체를 옮김(첫 박 맞추기)
  * pan  : 파형 영역 드래그 → 좌우 이동(손으로 잡아 끄는 방향)
  */
-type DragMode = 'new' | 'start' | 'end' | 'pan'
+type DragMode = 'new' | 'start' | 'end' | 'beat' | 'pan'
 interface DragState {
   mode: DragMode
   anchorSec: number
   startX: number
   startView: View
   moved: boolean
+  /** beat 모드: 잡은 박의 번호(격자 기준점에서 몇 번째 박인지)와 그때의 격자 */
+  beatIndex?: number
+  grid?: BeatGrid
 }
 
 interface Colors {
@@ -51,6 +62,7 @@ interface Colors {
   faint: string
   line: string
   ink: string
+  beat: string
 }
 
 /**
@@ -72,6 +84,8 @@ export function Waveform() {
   const buffer = usePlayer((s) => s.buffer)
   const levels = usePlayer((s) => s.levels)
   const regions = usePlayer((s) => s.regions)
+  const grid = usePlayer((s) => s.beatGrid)
+  const setBeatGrid = usePlayer((s) => s.setBeatGrid)
   const selection = usePlayer((s) => s.selection)
   const loopEnabled = usePlayer((s) => s.loopEnabled)
   const setSelection = usePlayer((s) => s.setSelection)
@@ -170,6 +184,7 @@ export function Waveform() {
       faint: v('--faint', '#7C8987'),
       line: v('--line', '#E0E5E2'),
       ink: v('--ink', '#14181A'),
+      beat: v('--beat', '#5B4FD6'),
     }
   }, [])
 
@@ -229,6 +244,28 @@ export function Waveform() {
     ctx.fillStyle = colors.line
     ctx.fillRect(0, mid, size.w, 1)
 
+    // 박자 선 — 파형 위에 그린다(아래에 깔면 확대했을 때 진한 파형 띠에 가려 안 보인다).
+    // 마디 첫 박은 진하게. 너무 촘촘하면 마디 선만(그것도 촘촘하면 생략)
+    if (grid && grid.bpm > 0 && span > 0) {
+      const period = 60 / grid.bpm
+      const bpb = Math.max(1, Math.round(grid.beatsPerBar))
+      const beatPx = (period / span) * size.w
+      const barsOnly = beatPx < BEAT_LINE_MIN_PX
+      if (!barsOnly || beatPx * bpb >= BEAT_LINE_MIN_PX) {
+        const k0 = Math.ceil((start - grid.anchorSec) / period)
+        const k1 = Math.floor((start + span - grid.anchorSec) / period)
+        ctx.fillStyle = colors.beat
+        for (let k = k0; k <= k1; k++) {
+          const isBar = ((k % bpb) + bpb) % bpb === 0
+          if (barsOnly && !isBar) continue
+          ctx.globalAlpha = isBar ? 1 : 0.7
+          const w = isBar ? 2 : 1
+          ctx.fillRect(Math.round(xOf(grid.anchorSec + k * period) - (w - 1) / 2), waveTop, w, waveH)
+        }
+        ctx.globalAlpha = 1
+      }
+    }
+
     // 눈금 띠 — 파형과 구분되게 옅은 바탕과 아래 경계선
     ctx.fillStyle = colors.faint
     ctx.globalAlpha = 0.07
@@ -264,7 +301,7 @@ export function Waveform() {
       ctx.fillRect((start / duration) * size.w, size.h - 3, Math.max(4, (span / duration) * size.w), 3)
       ctx.globalAlpha = 1
     }
-  }, [size, levels, regions, duration, view, zoomed, readColors])
+  }, [size, levels, regions, grid, duration, view, zoomed, readColors])
 
   /* ---------- 오버레이 레이어: 선택 구간 + 재생 헤드 ---------- */
   useEffect(() => {
@@ -374,13 +411,27 @@ export function Waveform() {
       if (Math.abs(x - xs) <= HANDLE_HIT_PX) return 'start'
       if (Math.abs(x - xe) <= HANDLE_HIT_PX) return 'end'
     }
-    return y < RULER_H ? 'new' : 'pan'
+    if (y < RULER_H) return 'new'
+    return beatAt(x, width) !== null ? 'beat' : 'pan'
+  }
+
+  /** x 근처의 잡을 수 있는 박자 선 번호. 선이 너무 촘촘하면(확대가 덜 됐으면) 잡지 않는다 */
+  const beatAt = (x: number, width: number): number | null => {
+    if (!grid || grid.bpm <= 0) return null
+    const period = 60 / grid.bpm
+    if ((period / view.span) * width < BEAT_GRAB_MIN_PX) return null
+    const sec = view.start + (x / width) * view.span
+    const k = Math.round((sec - grid.anchorSec) / period)
+    const bx = ((grid.anchorSec + k * period - view.start) / view.span) * width
+    return Math.abs(x - bx) <= BEAT_HIT_PX ? k : null
   }
 
   const cursorFor = (mode: DragMode, dragging: boolean) =>
     mode === 'start' || mode === 'end'
       ? 'ew-resize'
-      : mode === 'new'
+      : mode === 'beat'
+        ? 'col-resize'
+        : mode === 'new'
         ? 'crosshair'
         : zoomed
           ? dragging ? 'grabbing' : 'grab'
@@ -394,6 +445,10 @@ export function Waveform() {
     const mode = modeAt(x, e.clientY - r.top, r.width)
 
     dragRef.current = { mode, anchorSec: secFromClientX(e.clientX), startX: x, startView: view, moved: false }
+    if (mode === 'beat' && grid) {
+      dragRef.current.beatIndex = beatAt(x, r.width) ?? 0
+      dragRef.current.grid = grid
+    }
     setCursor(cursorFor(mode, true))
     el.setPointerCapture(e.pointerId)
   }
@@ -421,6 +476,12 @@ export function Waveform() {
     }
 
     const sec = secFromClientX(e.clientX)
+    if (drag.mode === 'beat' && drag.grid) {
+      // 잡은 박이 손을 따라오게 격자 전체를 옮긴다. 소리(클릭)도 바로 따라오고, 저장은 놓을 때
+      const g = drag.grid
+      setBeatGrid({ ...g, anchorSec: sec - (drag.beatIndex ?? 0) * (60 / g.bpm) }, false)
+      return
+    }
     if (drag.mode === 'new') {
       const a = Math.min(drag.anchorSec, sec)
       const b = Math.max(drag.anchorSec, sec)
@@ -446,6 +507,11 @@ export function Waveform() {
       return
     }
     if (drag.mode === 'pan') return
+    if (drag.mode === 'beat') {
+      const g = usePlayer.getState().beatGrid
+      if (g) setBeatGrid(g, true)
+      return
+    }
     // 손을 뗄 때 한 번만 엔진에 반영한다
     const final = usePlayer.getState().selection
     if (final) setSelection(final, true)
@@ -470,7 +536,7 @@ export function Waveform() {
       onPointerLeave={() => setHoverSec(null)}
       style={{ cursor }}
       role="slider"
-      aria-label="파형 — 위쪽 눈금을 드래그해 A-B 구간 선택, 파형 드래그로 좌우 이동, 휠로 확대/축소"
+      aria-label="파형 — 위쪽 눈금을 드래그해 A-B 구간 선택, 파형 드래그로 좌우 이동, 박자 선 드래그로 첫 박 맞추기, 휠로 확대/축소"
       aria-valuemin={0}
       aria-valuemax={duration}
       aria-valuenow={selection?.startSec ?? 0}

@@ -834,6 +834,55 @@ async function main() {
   check('다음 북마크를 빼면 첫 북마크만 반복한다',
     await cdp.eval(`window.__dodori.usePlayer.getState().loopRegionIds.length`) === 1)
 
+  const history = await cdp.eval(`(async () => {
+    const { usePlayer } = window.__dodori;
+    const state = usePlayer.getState;
+    state().cancelBeatEditing();
+    const original = state().selection;
+    state().setSelection({ startSec: 6, endSec: 7 }, false);
+    state().setSelection({ startSec: 6, endSec: 8 }, false);
+    state().setSelection({ startSec: 6, endSec: 8 });
+    document.querySelector('.history-controls button').click();
+    while (state().historyBusy) await new Promise(resolve => setTimeout(resolve, 10));
+    const rangeUndo = state().selection?.startSec === original.startSec;
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, shiftKey: true }));
+    while (state().historyBusy) await new Promise(resolve => setTimeout(resolve, 10));
+    const rangeRedo = state().selection?.endSec === 8;
+
+    await state().saveSelectionAsRegion('기록 확인');
+    const id = state().activeRegionId;
+    await state().undo();
+    const saveUndo = !state().regions.some(region => region.id === id);
+    await state().redo();
+    await state().renameRegion(id, '이름 수정');
+    await state().undo();
+    const renameUndo = state().regions.find(region => region.id === id)?.label === '기록 확인';
+    await state().redo();
+    await state().removeRegion(id);
+    await state().undo();
+    const deleteUndo = state().regions.find(region => region.id === id)?.label === '이름 수정';
+    await state().redo();
+    const deleteRedo = !state().regions.some(region => region.id === id);
+    await state().undo();
+    state().setPitch(2);
+    const branch = state().redoLabel === null;
+    await state().undo();
+    const pitchUndo = state().pitchSemitones === 0;
+
+    const songId = state().song.id;
+    await state().removeSong(songId);
+    await state().undo();
+    const songUndo = state().song?.id === songId && !!state().buffer &&
+      state().regions.some(region => region.id === id);
+    await state().redo();
+    const songRedo = !state().songs.some(song => song.id === songId) && !state().song;
+    return { rangeUndo, rangeRedo, saveUndo, renameUndo, deleteUndo, deleteRedo, branch, pitchUndo, songUndo, songRedo };
+  })()`)
+  check('구간 드래그를 한 번에 실행 취소하고 단축키로 다시 실행한다', history.rangeUndo && history.rangeRedo)
+  check('북마크 저장·이름 변경·삭제를 되돌린다', history.saveUndo && history.renameUndo && history.deleteUndo && history.deleteRedo)
+  check('새 변경을 하면 다시 실행 기록을 비우고 키 변경도 되돌린다', history.branch && history.pitchUndo)
+  check('곡 삭제를 취소하면 음원과 북마크가 함께 복원된다', history.songUndo && history.songRedo)
+
   /* 콘솔 에러 */
   const noise = cdp.consoleErrors.filter((e) => !/DevTools|favicon|AudioContext was not allowed/.test(e))
   check('페이지 콘솔에 에러가 없다', noise.length === 0, noise.slice(0, 3).join(' | ') || '깨끗')

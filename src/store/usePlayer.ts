@@ -23,6 +23,23 @@ export interface Selection {
   endSec: number
 }
 
+interface HistoryAction {
+  label: string
+  undo: () => void | Promise<void>
+  redo: () => void | Promise<void>
+  mergeKey?: string
+  recordedAt?: number
+}
+
+interface LoopState {
+  selection: Selection | null
+  activeRegionId: string | null
+  loopRegionIds: string[]
+  loopEnabled: boolean
+  beatGrid: BeatGrid | null
+  beatConfidence: number | null
+}
+
 interface PlayerState {
   songs: Song[]
   song: Song | null
@@ -43,6 +60,11 @@ interface PlayerState {
 
   status: string | null
   error: string | null
+  undoLabel: string | null
+  redoLabel: string | null
+  historyBusy: boolean
+  undo: () => Promise<void>
+  redo: () => Promise<void>
   storage: { usedBytes: number; quotaBytes: number } | null
 
   init: () => Promise<void>
@@ -97,6 +119,74 @@ export const usePlayer = create<PlayerState>()((set, get) => {
   let beatEditSession = 0
   let beatGridBeforeDrag: BeatGrid | null | undefined
   let beatEditStart: Pick<PlayerState, 'beatGrid' | 'beatConfidence' | 'metronomeOn'> | undefined
+  const past: HistoryAction[] = []
+  const future: HistoryAction[] = []
+  let replaying = false
+  let mutationQueue = Promise.resolve()
+  let pendingMutations = 0
+  let loopBeforeDrag: LoopState | undefined
+
+  const publishHistory = () => set({
+    undoLabel: past.at(-1)?.label ?? null,
+    redoLabel: future.at(-1)?.label ?? null,
+    historyBusy: replaying || pendingMutations > 0,
+  })
+
+  const record = (action: HistoryAction) => {
+    if (replaying) return
+    const last = past.at(-1)
+    const now = Date.now()
+    if (last && future.length === 0 && action.mergeKey && action.mergeKey === last.mergeKey &&
+        last.recordedAt !== undefined && now - last.recordedAt < 400) {
+      past[past.length - 1] = { ...action, undo: last.undo, recordedAt: now }
+    } else {
+      past.push({ ...action, recordedAt: now })
+      if (past.length > 50) past.shift()
+    }
+    future.length = 0
+    publishHistory()
+  }
+
+  const replay = async (from: HistoryAction[], to: HistoryAction[], direction: 'undo' | 'redo') => {
+    const action = from.at(-1)
+    if (!action || get().historyBusy || get().beatEditing || loopBeforeDrag) return
+    replaying = true
+    publishHistory()
+    try {
+      await action[direction]()
+      from.pop()
+      to.push({ ...action, recordedAt: undefined })
+    } catch (error) {
+      console.error(error)
+      set({ error: direction === 'undo' ? '실행 취소에 실패했습니다.' : '다시 실행에 실패했습니다.' })
+    } finally {
+      replaying = false
+      publishHistory()
+    }
+  }
+
+  const mutate = (action: () => Promise<void>): Promise<void> => {
+    if (replaying) return Promise.resolve()
+    pendingMutations++
+    publishHistory()
+    mutationQueue = mutationQueue.then(action).catch((error: unknown) => {
+      console.error(error)
+      set({ error: '변경을 저장하지 못했습니다.' })
+    }).finally(() => {
+      pendingMutations--
+      publishHistory()
+    })
+    return mutationQueue
+  }
+
+  const captureLoop = (): LoopState => {
+    const { selection, activeRegionId, loopRegionIds, loopEnabled, beatGrid, beatConfidence } = get()
+    return {
+      selection, activeRegionId, loopRegionIds, loopEnabled,
+      beatGrid: beatEditStart ? beatEditStart.beatGrid : beatGrid,
+      beatConfidence: beatEditStart ? beatEditStart.beatConfidence : beatConfidence,
+    }
+  }
 
   /** 선택 구간 + 루프 스위치를 엔진에 반영 */
   const syncLoop = () => {
@@ -126,6 +216,58 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     set({ storage: await repo.estimateStorage() })
   }
 
+  const restoreLoop = (snapshot: LoopState) => {
+    const existingIds = new Set(get().regions.map(({ id }) => id))
+    set({
+      ...snapshot,
+      activeRegionId: snapshot.activeRegionId && existingIds.has(snapshot.activeRegionId) ? snapshot.activeRegionId : null,
+      loopRegionIds: snapshot.loopRegionIds.filter((id) => existingIds.has(id)),
+    })
+    syncLoop()
+    syncMetronome()
+  }
+
+  const recordLoop = (label: string, songId: string, before: LoopState) => {
+    const after = captureLoop()
+    const apply = async (snapshot: LoopState) => {
+      if (get().song?.id !== songId) await get().selectSong(songId)
+      if (get().song?.id !== songId) throw new Error('곡을 열 수 없습니다.')
+      restoreLoop(snapshot)
+    }
+    record({ label, undo: () => apply(before), redo: () => apply(after) })
+  }
+
+  const changeSetting = <T>(
+    label: string, before: T, after: T, apply: (value: T) => void, mergeKey?: string,
+  ) => {
+    if (replaying || Object.is(before, after)) return
+    apply(after)
+    record({ label, undo: () => apply(before), redo: () => apply(after), mergeKey })
+  }
+
+  const refreshRegions = async (songId: string, snapshot?: LoopState) => {
+    const regions = await repo.listRegions(songId)
+    if (get().song?.id !== songId) return
+    set({ regions })
+    if (snapshot) restoreLoop(snapshot)
+  }
+
+  const refreshLibrary = async (removedIds: string[] = []) => {
+    const activeId = get().song?.id
+    if (activeId && removedIds.includes(activeId)) {
+      get().cancelBeatEditing()
+      engine.unload()
+      localStorage.removeItem(LAST_SONG_KEY)
+      loopBeforeDrag = undefined
+      set({
+        song: null, buffer: null, levels: null, regions: [], selection: null,
+        activeRegionId: null, loopRegionIds: [], isPlaying: false, beatGrid: null, beatConfidence: null,
+      })
+    }
+    set({ songs: await repo.listSongs() })
+    await refreshStorage()
+  }
+
   return {
     songs: [],
     song: null,
@@ -148,6 +290,11 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     beatConfidence: null,
     status: null,
     error: null,
+    undoLabel: null,
+    redoLabel: null,
+    historyBusy: false,
+    undo: () => replay(past, future, 'undo'),
+    redo: () => replay(future, past, 'redo'),
     storage: null,
 
     async init() {
@@ -165,45 +312,63 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       }
     },
 
-    async openFiles(files) {
+    openFiles(files) {
       const list = Array.from(files).filter((f) => f.type.startsWith('audio/') || /\.(mp3|m4a|wav|ogg|flac)$/i.test(f.name))
       if (list.length === 0) {
         set({ error: '오디오 파일이 아닙니다.' })
-        return
+        return Promise.resolve()
       }
+      return mutate(async () => {
+        const added: repo.SongContents[] = []
+        let lastId: string | null = null
+        for (const file of list) {
+          try {
+            set({ status: `${file.name} 읽는 중…`, error: null })
+            const raw = await file.arrayBuffer()
+            const fileHash = await sha256Hex(raw)
 
-      let lastId: string | null = null
-      for (const file of list) {
-        try {
-          set({ status: `${file.name} 읽는 중…`, error: null })
-          const raw = await file.arrayBuffer()
-          const fileHash = await sha256Hex(raw)
+            const existing = await repo.findSongByHash(fileHash)
+            if (existing) {
+              lastId = existing.id
+              continue
+            }
 
-          const existing = await repo.findSongByHash(fileHash)
-          if (existing) {
-            lastId = existing.id
-            continue
+            set({ status: `${file.name} 디코딩 중…` })
+            // decodeAudioData는 넘긴 ArrayBuffer를 detach한다. 원본은 File(Blob)로 따로 보관한다
+            const buffer = await engine.decode(raw)
+
+            const song = await repo.addSong({
+              title: file.name.replace(/\.[^.]+$/, ''),
+              durationSec: buffer.duration,
+              fileHash,
+              fileBlob: file,
+            })
+            added.push({ song, regions: [], sessions: [] })
+            lastId = song.id
+          } catch (e) {
+            set({ error: `${file.name}: ${e instanceof Error ? e.message : '열 수 없습니다'}` })
           }
-
-          set({ status: `${file.name} 디코딩 중…` })
-          // decodeAudioData는 넘긴 ArrayBuffer를 detach한다. 원본은 File(Blob)로 따로 보관한다
-          const buffer = await engine.decode(raw)
-
-          const song = await repo.addSong({
-            title: file.name.replace(/\.[^.]+$/, ''),
-            durationSec: buffer.duration,
-            fileHash,
-            fileBlob: file,
-          })
-          lastId = song.id
-        } catch (e) {
-          set({ error: `${file.name}: ${e instanceof Error ? e.message : '열 수 없습니다'}` })
         }
-      }
 
-      set({ status: null, songs: await repo.listSongs() })
-      await refreshStorage()
-      if (lastId) await get().selectSong(lastId)
+        set({ status: null, songs: await repo.listSongs() })
+        await refreshStorage()
+        if (lastId) await get().selectSong(lastId)
+        if (added.length) {
+          const ids = added.map(({ song }) => song.id)
+          record({
+            label: '곡 추가',
+            undo: async () => {
+              await repo.deleteSongs(ids)
+              await refreshLibrary(ids)
+            },
+            redo: async () => {
+              await repo.restoreSongs(added)
+              await refreshLibrary()
+              if (!get().song) await get().selectSong(ids.at(-1)!)
+            },
+          })
+        }
+      })
     },
 
     async selectSong(id) {
@@ -214,6 +379,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       }
 
       engine.pause()
+      loopBeforeDrag = undefined
       get().cancelBeatEditing()
       set({
         status: '불러오는 중…', error: null, isPlaying: false, selection: null, activeRegionId: null,
@@ -240,19 +406,29 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       }
     },
 
-    async removeSong(id) {
-      await repo.deleteSong(id)
-      if (get().song?.id === id) {
-        get().cancelBeatEditing()
-        engine.unload()
-        localStorage.removeItem(LAST_SONG_KEY)
-        set({
-          song: null, buffer: null, levels: null, regions: [], selection: null,
-          activeRegionId: null, loopRegionIds: [], isPlaying: false,
+    removeSong(id) {
+      return mutate(async () => {
+        const wasActive = get().song?.id === id
+        const before = captureLoop()
+        const removed = await repo.deleteSongs([id])
+        if (!removed.length) return
+        await refreshLibrary([id])
+        record({
+          label: '곡 삭제',
+          undo: async () => {
+            await repo.restoreSongs(removed)
+            await refreshLibrary()
+            if (wasActive && !get().song) {
+              await get().selectSong(id)
+              if (get().song?.id === id) restoreLoop(before)
+            }
+          },
+          redo: async () => {
+            await repo.deleteSongs([id])
+            await refreshLibrary([id])
+          },
         })
-      }
-      set({ songs: await repo.listSongs() })
-      await refreshStorage()
+      })
     },
 
     /**
@@ -260,41 +436,69 @@ export const usePlayer = create<PlayerState>()((set, get) => {
      * SimpleFilter가 매번 clear()되어 소리가 튄다. 손을 뗄 때 한 번만 반영한다.
      */
     setSelection(sel, commit = true) {
+      if (replaying) return
+      const songId = get().song?.id
+      const before = loopBeforeDrag ?? captureLoop()
+      loopBeforeDrag = commit ? undefined : before
       if (get().activeRegionId) get().cancelBeatEditing()
       set({ selection: sel, activeRegionId: null, loopRegionIds: [] })
-      if (commit) syncLoop()
+      if (!commit) return
+      syncLoop()
+      if (songId && (before.activeRegionId || before.selection?.startSec !== sel?.startSec || before.selection?.endSec !== sel?.endSec)) {
+        recordLoop(sel ? '구간 설정' : '구간 해제', songId, before)
+      }
     },
 
-    async saveSelectionAsRegion(label) {
+    saveSelectionAsRegion(label) {
       const { song, selection, beatGrid } = get()
       const savedGrid = beatEditStart ? beatEditStart.beatGrid : beatGrid
       const title = label.trim()
-      if (!song || !selection || !title) return
-      const region = await repo.addRegion({
-        songId: song.id,
-        label: title,
-        startSec: selection.startSec,
-        endSec: selection.endSec,
-        ...(savedGrid ? { beatGrid: savedGrid } : {}),
+      if (!song || !selection || !title) return Promise.resolve()
+      return mutate(async () => {
+        const before = captureLoop()
+        const region = await repo.addRegion({
+          songId: song.id,
+          label: title,
+          startSec: selection.startSec,
+          endSec: selection.endSec,
+          ...(savedGrid ? { beatGrid: savedGrid } : {}),
+        })
+        const regions = await repo.listRegions(song.id)
+        const selected = get().song?.id === song.id && get().selection === selection
+        if (get().song?.id === song.id) {
+          set({ regions, ...(selected ? { activeRegionId: region.id, loopRegionIds: [region.id] } : {}) })
+        }
+        const after = captureLoop()
+        record({
+          label: '북마크 저장',
+          undo: async () => {
+            await repo.removeRegion(region.id)
+            await refreshRegions(song.id, selected ? before : undefined)
+          },
+          redo: async () => {
+            await repo.restoreRegion(region)
+            await refreshRegions(song.id, selected ? after : undefined)
+          },
+        })
       })
-      const regions = await repo.listRegions(song.id)
-      set((state) => state.song?.id === song.id ? {
-        regions,
-        ...(state.selection === selection ? { activeRegionId: region.id, loopRegionIds: [region.id] } : {}),
-      } : state)
     },
 
     applyRegion(id) {
-      const region = get().regions.find((r) => r.id === id)
+      if (replaying) return
+      const { regions, activeRegionId, loopRegionIds } = get()
+      const region = regions.find((r) => r.id === id)
       if (!region) return
+      const before = captureLoop()
       selectRegion(region, [id])
       syncLoop()
       engine.seekSec(region.startSec)
+      if (activeRegionId !== id || loopRegionIds.length > 1) recordLoop('북마크 선택', region.songId, before)
     },
 
     toggleLoopRegion(id) {
-      const { activeRegionId, loopRegionIds, regions } = get()
-      if (!activeRegionId || !regions.some((region) => region.id === id)) return
+      const { song, activeRegionId, loopRegionIds, regions } = get()
+      if (replaying || !song || !activeRegionId || !regions.some((region) => region.id === id)) return
+      const before = captureLoop()
       if (!loopRegionIds.includes(id)) {
         set({ loopRegionIds: [...loopRegionIds, id], loopEnabled: true })
       } else {
@@ -305,34 +509,61 @@ export const usePlayer = create<PlayerState>()((set, get) => {
         else set({ loopRegionIds: remaining })
       }
       syncLoop()
+      recordLoop(loopRegionIds.includes(id) ? '반복에서 북마크 빼기' : '반복에 북마크 추가', song.id, before)
     },
 
-    async renameRegion(id, label) {
-      const { song } = get()
-      if (!song) return
-      await repo.updateRegion(id, { label })
-      set({ regions: await repo.listRegions(song.id) })
-    },
-
-    async removeRegion(id) {
-      const { song } = get()
-      if (!song) return
-      await repo.removeRegion(id)
-      const regions = await repo.listRegions(song.id)
-      const state = get()
-      if (state.song?.id !== song.id) return
-      const included = state.loopRegionIds.includes(id)
-      const remaining = state.loopRegionIds.filter((regionId) => regionId !== id)
-      set({ regions, loopRegionIds: remaining })
-      if (state.activeRegionId === id) {
-        const next = regions.find((region) => region.id === remaining[0])
-        if (next) selectRegion(next, remaining)
-        else {
-          get().cancelBeatEditing()
-          set({ activeRegionId: null })
+    renameRegion(id, label) {
+      const songId = get().song?.id
+      return mutate(async () => {
+        const previous = await repo.getRegion(id)
+        if (!previous || previous.deletedAt || previous.songId !== songId) return
+        const title = label.trim()
+        if (!title || previous.label === title) return
+        const apply = async (title: string) => {
+          await repo.updateRegion(id, { label: title })
+          await refreshRegions(previous.songId)
         }
-      }
-      if (included) syncLoop()
+        await apply(title)
+        record({ label: '북마크 이름 변경', undo: () => apply(previous.label), redo: () => apply(title) })
+      })
+    },
+
+    removeRegion(id) {
+      const songId = get().song?.id
+      return mutate(async () => {
+        const region = await repo.getRegion(id)
+        if (!region || region.deletedAt || region.songId !== songId) return
+        await repo.removeRegion(id)
+        const regions = await repo.listRegions(region.songId)
+        const state = get()
+        const before = captureLoop()
+        const included = state.song?.id === region.songId && state.loopRegionIds.includes(id)
+        if (state.song?.id === region.songId) {
+          const remaining = state.loopRegionIds.filter((regionId) => regionId !== id)
+          set({ regions, loopRegionIds: remaining })
+          if (state.activeRegionId === id) {
+            const next = regions.find((item) => item.id === remaining[0])
+            if (next) selectRegion(next, remaining)
+            else {
+              get().cancelBeatEditing()
+              set({ activeRegionId: null })
+            }
+          }
+          if (included) syncLoop()
+        }
+        const after = captureLoop()
+        record({
+          label: '북마크 삭제',
+          undo: async () => {
+            await repo.restoreRegion(region)
+            await refreshRegions(region.songId, included ? before : undefined)
+          },
+          redo: async () => {
+            await repo.removeRegion(id)
+            await refreshRegions(region.songId, included ? after : undefined)
+          },
+        })
+      })
     },
 
     async togglePlay() {
@@ -346,19 +577,23 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     },
 
     setLoopEnabled(on) {
-      set({ loopEnabled: on })
-      syncLoop()
+      changeSetting('구간 반복', get().loopEnabled, on, (loopEnabled) => {
+        set({ loopEnabled })
+        syncLoop()
+      })
     },
 
     setSpeed(v) {
       const speed = clamp(Number(v.toFixed(2)), SPEED_MIN, SPEED_MAX)
-      engine.setSpeed(speed)
-      set({ speed })
+      changeSetting('재생 속도', get().speed, speed, (value) => {
+        engine.setSpeed(value)
+        set({ speed: value })
+      }, 'speed')
     },
 
     setBeatEditing(on) {
       const { beatEditing, buffer, beatGrid, beatConfidence, metronomeOn, activeRegionId } = get()
-      if (on === beatEditing || (on && !buffer)) return
+      if (replaying || on === beatEditing || (on && !buffer)) return
       beatEditSession++
       if (on) {
         beatEditStart = { beatGrid, beatConfidence, metronomeOn }
@@ -368,22 +603,43 @@ export const usePlayer = create<PlayerState>()((set, get) => {
 
       get().cancelBeatDrag()
       const grid = get().beatGrid
-      const changed = grid !== beatEditStart?.beatGrid
+      const original = beatEditStart
+      const current = { beatGrid: grid, beatConfidence: get().beatConfidence, metronomeOn: get().metronomeOn }
       beatEditStart = undefined
       set({ beatEditing: false })
-      if (!changed || !activeRegionId) return
-
-      const storedGrid = grid ?? undefined
+      if (!original || grid === original.beatGrid) return
+      const songId = get().song?.id
       const previousGrid = get().regions.find((region) => region.id === activeRegionId)?.beatGrid
-      set((state) => ({
-        regions: state.regions.map((region) => region.id === activeRegionId ? { ...region, beatGrid: storedGrid } : region),
-      }))
-      void repo.updateRegion(activeRegionId, { beatGrid: storedGrid }).catch(() => {
-        set((state) => ({
-          error: '박자 설정을 저장하지 못했습니다.',
-          regions: state.regions.map((region) =>
-            region.id === activeRegionId && region.beatGrid === storedGrid ? { ...region, beatGrid: previousGrid } : region),
-        }))
+      const apply = async (snapshot: typeof current, storedGrid: BeatGrid | undefined) => {
+        if (activeRegionId && songId) {
+          await repo.updateRegion(activeRegionId, { beatGrid: storedGrid })
+          await refreshRegions(songId)
+        } else if (replaying && songId && get().song?.id !== songId) {
+          await get().selectSong(songId)
+          if (get().song?.id !== songId) throw new Error('곡을 열 수 없습니다.')
+        }
+        if (get().song?.id === songId && get().activeRegionId === activeRegionId) {
+          set(snapshot)
+          syncMetronome()
+        }
+      }
+      if (!activeRegionId || !songId) {
+        record({ label: '박자 설정', undo: () => apply(original, undefined), redo: () => apply(current, undefined) })
+        return
+      }
+      void mutate(async () => {
+        try {
+          await repo.updateRegion(activeRegionId, { beatGrid: grid ?? undefined })
+          await refreshRegions(songId)
+          record({ label: '박자 설정', undo: () => apply(original, previousGrid), redo: () => apply(current, grid ?? undefined) })
+        } catch (error) {
+          if (get().song?.id === songId && get().activeRegionId === activeRegionId &&
+              get().beatGrid === grid && !get().beatEditing) {
+            set(original)
+            syncMetronome()
+          }
+          throw error
+        }
       })
     },
 
@@ -414,15 +670,19 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     },
 
     setMetronomeOn(on) {
-      if (beatEditStart) beatEditStart.metronomeOn = on
-      set({ metronomeOn: on })
-      syncMetronome()
+      changeSetting('메트로놈 켜기·끄기', get().metronomeOn, on, (metronomeOn) => {
+        if (beatEditStart) beatEditStart.metronomeOn = metronomeOn
+        set({ metronomeOn })
+        syncMetronome()
+      })
     },
 
     setMetronomeVolume(v) {
       const metronomeVolume = clamp(v, 0, 1)
-      engine.setMetronomeVolume(metronomeVolume)
-      set({ metronomeVolume })
+      changeSetting('메트로놈 음량', get().metronomeVolume, metronomeVolume, (value) => {
+        engine.setMetronomeVolume(value)
+        set({ metronomeVolume: value })
+      }, 'metronomeVolume')
     },
 
     markBeat() {
@@ -465,14 +725,18 @@ export const usePlayer = create<PlayerState>()((set, get) => {
 
     setPitch(v) {
       const pitchSemitones = clamp(Math.round(v), PITCH_MIN, PITCH_MAX)
-      engine.setPitchSemitones(pitchSemitones)
-      set({ pitchSemitones })
+      changeSetting('키 조정', get().pitchSemitones, pitchSemitones, (value) => {
+        engine.setPitchSemitones(value)
+        set({ pitchSemitones: value })
+      })
     },
 
     setVolume(v) {
       const volume = clamp(v, 0, 1)
-      engine.setVolume(volume)
-      set({ volume })
+      changeSetting('재생 음량', get().volume, volume, (value) => {
+        engine.setVolume(value)
+        set({ volume: value })
+      }, 'volume')
     },
   }
 })

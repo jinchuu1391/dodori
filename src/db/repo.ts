@@ -39,15 +39,44 @@ export async function touchSong(id: string): Promise<void> {
   await db.songs.update(id, { lastPracticedAt: now() })
 }
 
-export async function deleteSong(id: string): Promise<void> {
+export interface SongContents {
+  song: Song
+  regions: Region[]
+  sessions: PracticeSession[]
+}
+
+export async function deleteSongs(ids: string[]): Promise<SongContents[]> {
+  return db.transaction('rw', db.songs, db.regions, db.sessions, async () => {
+    const removed: SongContents[] = []
+    for (const id of ids) {
+      const song = await db.songs.get(id)
+      if (!song) continue
+      const regions = await db.regions.where('songId').equals(id).toArray()
+      const sessions = await db.sessions.where('songId').equals(id).toArray()
+      await db.regions.where('songId').equals(id).delete()
+      await db.sessions.where('songId').equals(id).delete()
+      await db.songs.delete(id)
+      removed.push({ song, regions, sessions })
+    }
+    return removed
+  })
+}
+
+export async function restoreSongs(contents: SongContents[]): Promise<void> {
   await db.transaction('rw', db.songs, db.regions, db.sessions, async () => {
-    await db.regions.where('songId').equals(id).delete()
-    await db.sessions.where('songId').equals(id).delete()
-    await db.songs.delete(id)
+    for (const { song, regions, sessions } of contents) {
+      await db.songs.add(song)
+      await db.regions.bulkAdd(regions)
+      await db.sessions.bulkAdd(sessions)
+    }
   })
 }
 
 /* ---------- 구간 ---------- */
+
+export function getRegion(id: string): Promise<Region | undefined> {
+  return db.regions.get(id)
+}
 
 /** tombstone(deletedAt)이 찍힌 구간은 걸러서 돌려준다 */
 export async function listRegions(songId: string): Promise<Region[]> {
@@ -70,6 +99,10 @@ export async function addRegion(input: {
 
 export async function updateRegion(id: string, patch: Partial<Region>): Promise<void> {
   await db.regions.update(id, { ...patch, updatedAt: now() })
+}
+
+export async function restoreRegion(region: Region): Promise<void> {
+  await db.regions.put({ ...region, updatedAt: now() })
 }
 
 /**

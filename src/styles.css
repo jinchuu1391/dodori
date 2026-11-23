@@ -89,6 +89,7 @@ h3 {
 }
 .topbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 14px;
   padding: 12px 20px;
@@ -120,6 +121,20 @@ h3 {
 .topbar .err {
   font-size: 0.8rem;
   color: var(--danger);
+}
+.history-controls {
+  display: flex;
+  gap: 6px;
+}
+.history-controls button {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.73rem;
+  white-space: nowrap;
+}
+.history-controls button:hover:not(:disabled) {
+  background: var(--accent-weak);
 }
 
 .body {

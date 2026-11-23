@@ -274,6 +274,11 @@ async function main() {
   check('구간 길이가 드래그 폭과 맞는다', lenNum > 2.4 && lenNum < 3.2, `${sel.len} (기대 ≈2.8초)`)
 
   /* 5. 구간 저장 */
+  check('이름을 입력해야 구간을 저장할 수 있다',
+    await cdp.eval(`document.querySelector('.save-region button').disabled`))
+  await cdp.eval(`window.__dodori.usePlayer.getState().saveSelectionAsRegion('   ')`)
+  check('공백만 있는 제목은 저장되지 않는다',
+    await cdp.eval(`document.querySelectorAll('.regions li').length`) === 0)
   await cdp.eval(`(() => {
     const i = document.querySelector('.save-region input');
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
@@ -763,6 +768,33 @@ async function main() {
 
   await cdp.send('Page.captureScreenshot', { format: 'png' })
     .then((r) => writeFileSync(SHOT.replace(/\.png$/, '-metro.png'), Buffer.from(r.data, 'base64')))
+
+  /* 북마크를 반복에 추가해서 떨어진 구간을 이어 재생한다. */
+  await cdp.eval(`(async () => {
+    const player = window.__dodori.usePlayer.getState;
+    for (const [label, startSec, endSec] of [['첫 구간', 1, 2], ['다음 구간', 4, 5]]) {
+      player().setSelection({ startSec, endSec });
+      await player().saveSelectionAsRegion(label);
+    }
+    document.querySelector('.regions .go').click();
+    await player().togglePlay();
+    document.querySelector('[aria-label="다음 구간 반복에 추가"]').click();
+  })()`)
+  check('선택한 북마크에 반복 순서가 표시된다',
+    await cdp.eval(`[...document.querySelectorAll('.r-order')].map(el => el.textContent).join(',')`) === '1,2')
+  const visited = []
+  for (let i = 0; i < 60; i++) {
+    const position = await cdp.eval(`window.__dodori.engine.getPositionSec()`)
+    visited.push(position)
+    if (visited.some((p) => p >= 4 && p < 5) && position >= 1 && position < 2) break
+    await sleep(50)
+  }
+  const secondVisit = visited.findIndex((p) => p >= 4 && p < 5)
+  check('재생 헤드가 빈 구간을 건너뛰고 첫 구간으로 돌아온다',
+    secondVisit > 0 && visited.at(-1) < 2 && visited.every((p) => (p >= 1 && p < 2) || (p >= 4 && p < 5)))
+  await cdp.eval(`document.querySelector('[aria-label="다음 구간 반복에서 빼기"]').click()`)
+  check('다음 북마크를 빼면 첫 북마크만 반복한다',
+    await cdp.eval(`window.__dodori.usePlayer.getState().loopRegionIds.length`) === 1)
 
   /* 콘솔 에러 */
   const noise = cdp.consoleErrors.filter((e) => !/DevTools|favicon|AudioContext was not allowed/.test(e))

@@ -240,4 +240,39 @@ test('소수 position이 들어와도 NaN 없이 정수 프레임을 읽는다 (
   assert.deepEqual(leftOf(target, 4), [123, 124, 125, 126])
 })
 
+test('반복에 북마크를 추가하면 현재 구간 끝에서 다음 구간으로 건너뛴다', () => {
+  const src = new LoopingBufferSource(fakeBuffer(TOTAL))
+  const second = { start: 5000, end: 7000 }
+  src.setLoop(true, START, END)
+  const before = pump(src, START, LEN * 2 + LEN - 2)
+  src.setLoopRanges([{ start: START, end: END }, second])
+  assert.deepEqual(pump(src, before.pos, 5).left, [END - 2, END - 1, 5000, 5001, 5002])
+  assert.equal(src.frameAtPosition(before.pos + 5), 5003)
+
+  src.seek(second.end - 2)
+  assert.deepEqual(pump(src, second.end - 2, 4).left, [6998, 6999, START, START + 1])
+})
+
+test('겹치거나 맞닿은 북마크는 합쳐서 한 바퀴에 한 번만 읽는다', () => {
+  const src = new LoopingBufferSource(fakeBuffer(TOTAL))
+  src.setLoopRanges([
+    { start: 3600, end: 5000 },
+    { start: 2400, end: 3600 },
+    { start: START, end: END },
+    { start: 1400, end: 2000 },
+  ])
+  assert.equal(src.hasGaps, false)
+  assert.equal(src.loopLength, 5000 - START)
+  const result = pump(src, START, 5000 - START + 1)
+  assert.deepEqual(result.left, Array.from({ length: 4001 }, (_, i) => START + i % 4000))
+})
+
+test('두 번째 북마크를 빼면 남은 북마크 안의 위치를 유지한다', () => {
+  const src = new LoopingBufferSource(fakeBuffer(TOTAL))
+  src.setLoopRanges([{ start: START, end: END }, { start: 5000, end: 7000 }])
+  const before = pump(src, START, LEN + 2000 + 80)
+  src.setLoopRanges([{ start: START, end: END }])
+  assert.deepEqual(pump(src, before.pos, 2).left, [START + 80, START + 81])
+})
+
 console.log(`\n${passed} passed`)

@@ -3,6 +3,16 @@ import type { SoundSource } from 'soundtouchjs'
 /** 이보다 짧은 구간은 루프로 취급하지 않는다(≈23ms). 0 길이 루프로 무한정지하는 걸 막는다 */
 export const MIN_LOOP_FRAMES = 1024
 
+export interface LoopRange {
+  start: number
+  end: number
+}
+
+interface LoopSegment extends LoopRange {
+  /** 원본 구간 사이의 빈 부분을 뺀 시간축에서의 시작점 */
+  position: number
+}
+
 /**
  * 루프 정밀도의 핵심.
  *
@@ -33,6 +43,8 @@ export class LoopingBufferSource implements SoundSource {
   private positionOffset = 0
   /** 마지막 extract가 끝난 position — 다음 extract가 시작할 자리 */
   private nextPosition = 0
+  private segments: LoopSegment[] = []
+  private packedLength = 0
 
   readonly buffer: AudioBuffer
   private left: Float32Array
@@ -47,7 +59,7 @@ export class LoopingBufferSource implements SoundSource {
   }
 
   private get loopable(): boolean {
-    return this.loop && this.loopEndFrame - this.loopStartFrame >= MIN_LOOP_FRAMES
+    return this.loop && this.loopLength >= MIN_LOOP_FRAMES
   }
 
   /**
@@ -56,17 +68,63 @@ export class LoopingBufferSource implements SoundSource {
    * 읽던 자리가 새 구간 밖이면 어디로 갈지는 호출하는 쪽(엔진)이 seek로 정한다.
    */
   setLoop(loop: boolean, startFrame: number, endFrame: number) {
-    this.positionOffset = this.servedFrame - this.nextPosition
+    this.segments = []
+    this.packedLength = 0
     this.loop = loop
     this.loopStartFrame = startFrame
     this.loopEndFrame = endFrame
+    this.positionOffset = this.servedFrame - this.nextPosition
+  }
+
+  setLoopRanges(ranges: readonly LoopRange[]) {
+    const merged: LoopRange[] = []
+    for (const range of [...ranges].sort((a, b) => a.start - b.start)) {
+      if (range.end <= range.start) continue
+      const last = merged.at(-1)
+      if (last && range.start <= last.end) last.end = Math.max(last.end, range.end)
+      else merged.push({ ...range })
+    }
+    const first = merged[0]
+    this.setLoop(Boolean(first), first?.start ?? 0, merged.at(-1)?.end ?? 0)
+    if (merged.length < 2) return
+
+    let position = this.loopStartFrame
+    this.segments = merged.map((range) => {
+      const segment = { ...range, position }
+      position += range.end - range.start
+      return segment
+    })
+    this.packedLength = position - this.loopStartFrame
+    this.positionOffset = this.loopPosition(this.servedFrame) - this.nextPosition
+  }
+
+  get hasGaps(): boolean {
+    return this.segments.length > 0
+  }
+
+  get loopLength(): number {
+    return this.hasGaps ? this.packedLength : this.loopEndFrame - this.loopStartFrame
+  }
+
+  containsFrame(frame: number): boolean {
+    if (this.hasGaps) return this.segments.some(({ start, end }) => frame >= start && frame < end)
+    return frame >= this.loopStartFrame && frame < this.loopEndFrame
+  }
+
+  /** 원본 프레임을 반복 재생 시간축으로 옮긴다. 빈 부분은 다음 구간의 시작으로 접는다. */
+  loopPosition(frame: number): number {
+    if (!this.hasGaps || frame < this.loopStartFrame) return frame
+    for (const segment of this.segments) {
+      if (frame < segment.end) return segment.position + Math.max(0, frame - segment.start)
+    }
+    return this.loopStartFrame + this.packedLength
   }
 
   /** SimpleFilter.sourcePosition = frame 과 함께 부른다. 보정값도 비운다 */
   seek(frame: number) {
     this.servedFrame = frame
     this.nextPosition = frame
-    this.positionOffset = 0
+    this.positionOffset = this.loopPosition(frame) - frame
   }
 
   /**
@@ -81,9 +139,12 @@ export class LoopingBufferSource implements SoundSource {
   mapFrame(position: number): number {
     if (!this.loopable) return position
     if (position < this.loopStartFrame) return position
-    const len = this.loopEndFrame - this.loopStartFrame
+    const len = this.loopLength
     const offset = (position - this.loopStartFrame) % len
-    return this.loopStartFrame + (offset < 0 ? offset + len : offset)
+    const packed = this.loopStartFrame + offset
+    if (!this.hasGaps) return packed
+    const segment = this.segments.find(({ position, start, end }) => packed < position + end - start)!
+    return segment.start + (packed - segment.position)
   }
 
   extract(target: Float32Array, numFrames: number, position: number): number {
@@ -102,7 +163,7 @@ export class LoopingBufferSource implements SoundSource {
       const boundary = loopable
         ? src < this.loopStartFrame
           ? this.loopStartFrame
-          : Math.min(this.loopEndFrame, totalFrames)
+          : Math.min(this.hasGaps ? this.segments.find(({ end }) => src < end)!.end : this.loopEndFrame, totalFrames)
         : totalFrames
 
       const run = Math.min(numFrames - written, boundary - src)

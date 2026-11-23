@@ -31,6 +31,7 @@ interface PlayerState {
   levels: WaveLevels | null
   regions: Region[]
   activeRegionId: string | null
+  loopRegionIds: string[]
 
   selection: Selection | null
   loopEnabled: boolean
@@ -53,6 +54,7 @@ interface PlayerState {
   setSelection: (sel: Selection | null, commit?: boolean) => void
   saveSelectionAsRegion: (label: string) => Promise<void>
   applyRegion: (id: string) => void
+  toggleLoopRegion: (id: string) => void
   renameRegion: (id: string, label: string) => Promise<void>
   removeRegion: (id: string) => Promise<void>
 
@@ -90,14 +92,25 @@ interface PlayerState {
 export const usePlayer = create<PlayerState>()((set, get) => {
   /** 선택 구간 + 루프 스위치를 엔진에 반영 */
   const syncLoop = () => {
-    const { selection, loopEnabled } = get()
-    if (loopEnabled && selection) engine.setLoop(selection.startSec, selection.endSec)
-    else engine.setLoop(null, null)
+    const { selection, loopEnabled, loopRegionIds, regions } = get()
+    if (!loopEnabled) engine.setLoopRanges([])
+    else if (loopRegionIds.length > 1) engine.setLoopRanges(regions.filter((region) => loopRegionIds.includes(region.id)))
+    else engine.setLoopRanges(selection ? [selection] : [])
   }
 
   const syncMetronome = () => {
     const { metronomeOn, beatGrid } = get()
     engine.setMetronome(metronomeOn, beatGrid)
+  }
+
+  const selectRegion = (region: Region, loopRegionIds: string[]) => {
+    set({
+      selection: { startSec: region.startSec, endSec: region.endSec },
+      activeRegionId: region.id,
+      loopRegionIds,
+      ...(region.beatGrid ? { beatGrid: region.beatGrid, beatConfidence: null } : {}),
+    })
+    syncMetronome()
   }
 
   const refreshStorage = async () => {
@@ -111,6 +124,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     levels: null,
     regions: [],
     activeRegionId: null,
+    loopRegionIds: [],
     selection: null,
     loopEnabled: true,
     isPlaying: false,
@@ -192,7 +206,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       engine.pause()
       set({
         status: '불러오는 중…', error: null, isPlaying: false, selection: null, activeRegionId: null,
-        beatGrid: null, beatConfidence: null,
+        loopRegionIds: [], beatGrid: null, beatConfidence: null,
       })
 
       try {
@@ -220,7 +234,10 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       if (get().song?.id === id) {
         engine.unload()
         localStorage.removeItem(LAST_SONG_KEY)
-        set({ song: null, buffer: null, levels: null, regions: [], selection: null, isPlaying: false })
+        set({
+          song: null, buffer: null, levels: null, regions: [], selection: null,
+          activeRegionId: null, loopRegionIds: [], isPlaying: false,
+        })
       }
       set({ songs: await repo.listSongs() })
       await refreshStorage()
@@ -231,34 +248,49 @@ export const usePlayer = create<PlayerState>()((set, get) => {
      * SimpleFilter가 매번 clear()되어 소리가 튄다. 손을 뗄 때 한 번만 반영한다.
      */
     setSelection(sel, commit = true) {
-      set({ selection: sel, activeRegionId: null })
+      set({ selection: sel, activeRegionId: null, loopRegionIds: [] })
       if (commit) syncLoop()
     },
 
     async saveSelectionAsRegion(label) {
       const { song, selection, beatGrid } = get()
-      if (!song || !selection) return
+      const title = label.trim()
+      if (!song || !selection || !title) return
       const region = await repo.addRegion({
         songId: song.id,
-        label: label.trim() || '새 구간',
+        label: title,
         startSec: selection.startSec,
         endSec: selection.endSec,
         ...(beatGrid ? { beatGrid } : {}),
       })
-      set({ regions: await repo.listRegions(song.id), activeRegionId: region.id })
+      const regions = await repo.listRegions(song.id)
+      set((state) => state.song?.id === song.id ? {
+        regions,
+        ...(state.selection === selection ? { activeRegionId: region.id, loopRegionIds: [region.id] } : {}),
+      } : state)
     },
 
     applyRegion(id) {
       const region = get().regions.find((r) => r.id === id)
       if (!region) return
-      set({ selection: { startSec: region.startSec, endSec: region.endSec }, activeRegionId: id })
-      // 구간에 박 격자가 있으면 그걸로, 없으면 쓰던 격자를 그대로(템포가 일정한 곡은 한 번만 맞추면 된다)
-      if (region.beatGrid) {
-        set({ beatGrid: region.beatGrid, beatConfidence: null })
-        syncMetronome()
-      }
+      selectRegion(region, [id])
       syncLoop()
       engine.seekSec(region.startSec)
+    },
+
+    toggleLoopRegion(id) {
+      const { activeRegionId, loopRegionIds, regions } = get()
+      if (!activeRegionId || !regions.some((region) => region.id === id)) return
+      if (!loopRegionIds.includes(id)) {
+        set({ loopRegionIds: [...loopRegionIds, id], loopEnabled: true })
+      } else {
+        if (loopRegionIds.length < 2) return
+        const remaining = loopRegionIds.filter((regionId) => regionId !== id)
+        const next = regions.find((region) => region.id === remaining[0])
+        if (id === activeRegionId && next) selectRegion(next, remaining)
+        else set({ loopRegionIds: remaining })
+      }
+      syncLoop()
     },
 
     async renameRegion(id, label) {
@@ -272,10 +304,18 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       const { song } = get()
       if (!song) return
       await repo.removeRegion(id)
-      set({
-        regions: await repo.listRegions(song.id),
-        activeRegionId: get().activeRegionId === id ? null : get().activeRegionId,
-      })
+      const regions = await repo.listRegions(song.id)
+      const state = get()
+      if (state.song?.id !== song.id) return
+      const included = state.loopRegionIds.includes(id)
+      const remaining = state.loopRegionIds.filter((regionId) => regionId !== id)
+      set({ regions, loopRegionIds: remaining })
+      if (state.activeRegionId === id) {
+        const next = regions.find((region) => region.id === remaining[0])
+        if (next) selectRegion(next, remaining)
+        else set({ activeRegionId: null })
+      }
+      if (included) syncLoop()
     },
 
     async togglePlay() {

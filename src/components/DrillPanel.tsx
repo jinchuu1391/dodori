@@ -47,18 +47,20 @@ export function DrillPanel() {
                 className="save-region"
                 onSubmit={(e) => {
                   e.preventDefault()
-                  if (!selection) return
+                  if (!selection || !label.trim()) return
                   void saveSelectionAsRegion(label)
                   setLabel('')
                 }}
               >
                 <input
                   type="text"
+                  aria-label="구간 이름"
                   placeholder="구간 이름 (예: 1절 고음)"
+                  required
                   value={label}
                   onChange={(e) => setLabel(e.target.value)}
                 />
-                <button type="submit">구간 저장</button>
+                <button type="submit" disabled={!label.trim()}>구간 저장</button>
               </form>
             )}
           </span>

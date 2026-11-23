@@ -543,6 +543,20 @@ h3 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.r-order {
+  margin-right: 0.5em;
+  color: var(--loop);
+  font-family: var(--mono);
+}
+.r-loop {
+  flex: 0 0 auto;
+  padding: 4px 6px;
+  font-size: 0.73rem;
+  white-space: nowrap;
+}
+.r-loop[aria-pressed='true'] {
+  color: var(--loop);
+}
 .r-time,
 .r-len {
   font-family: var(--mono);

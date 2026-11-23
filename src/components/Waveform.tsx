@@ -87,6 +87,7 @@ export function Waveform() {
   const grid = usePlayer((s) => s.beatGrid)
   const setBeatGrid = usePlayer((s) => s.setBeatGrid)
   const selection = usePlayer((s) => s.selection)
+  const loopRegionIds = usePlayer((s) => s.loopRegionIds)
   const loopEnabled = usePlayer((s) => s.loopEnabled)
   const setSelection = usePlayer((s) => s.setSelection)
   const seek = usePlayer((s) => s.seek)
@@ -314,6 +315,9 @@ export function Waveform() {
     if (!ctx) return
 
     const { start, span } = view
+    const ranges = loopRegionIds.length > 1
+      ? regions.filter((region) => loopRegionIds.includes(region.id))
+      : selection ? [selection] : []
     let raf = 0
     const draw = () => {
       const colors = colorsRef.current ?? readColors()
@@ -326,12 +330,17 @@ export function Waveform() {
       if (duration > 0 && span > 0) {
         const xOf = (sec: number) => ((sec - start) / span) * size.w
 
-        // 선택 구간 A-B
+        // 반복할 북마크를 한 번에 칠해 겹치는 곳도 같은 색으로 표시한다.
         if (selection) {
           const x1 = xOf(selection.startSec)
           const x2 = xOf(selection.endSec)
           ctx.fillStyle = colors.loopWeak
-          ctx.fillRect(x1, waveTop, Math.max(1, x2 - x1), waveH)
+          ctx.beginPath()
+          for (const range of ranges) {
+            const left = xOf(range.startSec)
+            ctx.rect(left, waveTop, Math.max(1, xOf(range.endSec) - left), waveH)
+          }
+          ctx.fill()
 
           ctx.fillStyle = colors.loop
           ctx.globalAlpha = loopEnabled ? 1 : 0.45
@@ -388,7 +397,7 @@ export function Waveform() {
     }
     raf = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(raf)
-  }, [size, duration, view, selection, loopEnabled, hoverSec, readColors])
+  }, [size, duration, view, selection, loopRegionIds, regions, loopEnabled, hoverSec, readColors])
 
   /* ---------- 포인터 조작 ---------- */
 

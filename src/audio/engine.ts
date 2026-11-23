@@ -198,7 +198,7 @@ export class AudioEngine {
     if (this.ctx.state === 'suspended') await this.ctx.resume()
     // 루프가 켜져 있는데 헤드가 구간 밖이면 A로 들어간다
     const s = this.source!
-    if (s.loop && (this.restingFrame < s.loopStartFrame || this.restingFrame >= s.loopEndFrame)) {
+    if (s.loop && !s.containsFrame(this.restingFrame)) {
       this.seekFrame(s.loopStartFrame)
     }
     this.anchorCtxTime = this.ctx.currentTime
@@ -224,7 +224,9 @@ export class AudioEngine {
 
   seekSec(sec: number) {
     if (!this.buffer) return
-    this.seekFrame(Math.round(sec * this.buffer.sampleRate))
+    const frame = Math.round(sec * this.buffer.sampleRate)
+    const source = this.source
+    this.seekFrame(source?.hasGaps ? source.mapFrame(source.loopPosition(Math.max(frame, source.loopStartFrame))) : frame)
   }
 
   private seekFrame(frame: number) {
@@ -250,23 +252,25 @@ export class AudioEngine {
 
   /** endSec이 null이면 루프 해제 */
   setLoop(startSec: number | null, endSec: number | null) {
+    this.setLoopRanges(startSec !== null && endSec !== null ? [{ startSec, endSec }] : [])
+  }
+
+  setLoopRanges(ranges: readonly { startSec: number; endSec: number }[]) {
     if (!this.source || !this.buffer) return
     const s = this.source
     const sr = this.buffer.sampleRate
-    // 재생 중에 바꿔도 읽던 자리에서 이어진다(LoopingBufferSource.setLoop 참고)
-    if (startSec === null || endSec === null || endSec <= startSec) {
-      s.setLoop(false, s.loopStartFrame, s.loopEndFrame)
-      return
-    }
-    const a = Math.max(0, Math.round(startSec * sr))
-    const b = Math.min(this.buffer.length, Math.round(endSec * sr))
-    s.setLoop(true, a, b)
+    const length = this.buffer.length
+    s.setLoopRanges(ranges.map(({ startSec, endSec }) => ({
+      start: Math.max(0, Math.round(startSec * sr)),
+      end: Math.min(length, Math.round(endSec * sr)),
+    })))
 
     // 지금 위치가 새 구간 밖이면 A로. 재생 중에는 실제로 읽고 있는 자리(servedFrame)로 판단한다 —
     // currentFrame()은 화면용 추정이라 ±100ms쯤 흔들려서, 루프가 막 감긴 직후엔 A 앞으로
     // 잘못 나와 멀쩡한 재생을 A로 되돌려 버린다.
     const head = this.playing ? s.servedFrame : this.restingFrame
-    if (head < a || head >= b) this.seekFrame(a)
+    if (s.loop && !s.containsFrame(head)) this.seekFrame(s.loopStartFrame)
+    if (this.smooth && s.loop && !s.containsFrame(this.smooth.frame)) this.smooth = null
   }
 
   get loopEnabled() {
@@ -353,7 +357,7 @@ export class AudioEngine {
       const f = fp < this.clickGuard ? NaN : source.frameAtPosition(fp)
       frames[i] = f >= len ? NaN : f
     }
-    mixer.mix(left, right, frames, n)
+    mixer.mix(left, right, frames, n, source.hasGaps ? this.tempo + 0.25 : Infinity)
   }
 
   setVolume(v: number) {
@@ -376,8 +380,9 @@ export class AudioEngine {
     const sr = this.buffer.sampleRate
     const elapsed = this.ctx.currentTime - this.anchorCtxTime
     const lead = BUFFER_SIZE / this.ctx.sampleRate + this.outputLatency() + EXTRA_LEAD_SEC
-    const frame = this.anchorFrame + (elapsed - lead) * this.tempo * sr
-    return this.source.mapFrame(Math.max(0, Math.min(frame, this.buffer.length)))
+    const source = this.source
+    const frame = source.loopPosition(this.anchorFrame) + (elapsed - lead) * this.tempo * sr
+    return source.mapFrame(source.hasGaps ? Math.max(source.loopStartFrame, frame) : Math.max(0, Math.min(frame, this.buffer.length)))
   }
 
   /**
@@ -398,11 +403,12 @@ export class AudioEngine {
     const sr = this.buffer.sampleRate
     const dt = Math.max(0, (now - this.smooth.at) / 1000)
     const advance = dt * this.tempo * sr
-    const pred = s.mapFrame(Math.min(this.smooth.frame + advance, this.buffer.length))
+    const projected = s.loopPosition(this.smooth.frame) + advance
+    const pred = s.mapFrame(s.hasGaps ? projected : Math.min(projected, this.buffer.length))
 
     // 루프 되감기를 사이에 두고 앵커와 예측이 갈렸으면 구간 길이만큼 접어서 비교한다
-    let err = raw - pred
-    const len = s.loopEndFrame - s.loopStartFrame
+    let err = s.loopPosition(raw) - s.loopPosition(pred)
+    const len = s.loopLength
     if (s.loop && len > 0 && Math.abs(err) > len / 2) err -= Math.sign(err) * len
 
     let frame: number
@@ -411,7 +417,8 @@ export class AudioEngine {
     } else {
       const pull = err * (1 - Math.exp(-dt / SMOOTH_TAU_SEC))
       const limit = advance * MAX_CORRECTION
-      frame = s.mapFrame(Math.min(pred + Math.max(-limit, Math.min(limit, pull)), this.buffer.length))
+      const corrected = s.loopPosition(pred) + Math.max(-limit, Math.min(limit, pull))
+      frame = s.mapFrame(s.hasGaps ? Math.max(s.loopStartFrame, corrected) : Math.min(corrected, this.buffer.length))
     }
     this.smooth = { frame, at: now }
     return frame

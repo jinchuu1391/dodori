@@ -66,13 +66,13 @@ export class ClickMixer {
   /**
    * @param frames 출력 샘플마다 들리는 원본 프레임(구간 반복이면 접힌 값). NaN = 아직 소리 없음
    */
-  mix(left: Float32Array, right: Float32Array, frames: Float64Array, n: number) {
+  mix(left: Float32Array, right: Float32Array, frames: Float64Array, n: number, maxAdvance = Infinity) {
     const g = this.grid
-    if (g && g.bpm > 0) this.findBeats(g, frames, n)
+    if (g && g.bpm > 0) this.findBeats(g, frames, n, maxAdvance)
     this.render(left, right, n)
   }
 
-  private findBeats(g: BeatGrid, frames: Float64Array, n: number) {
+  private findBeats(g: BeatGrid, frames: Float64Array, n: number, maxAdvance: number) {
     const interval = (60 / g.bpm) * this.sourceRate
     const anchor = g.anchorSec * this.sourceRate
     const tolerance = LANDING_TOLERANCE_SEC * this.sourceRate
@@ -84,7 +84,8 @@ export class ClickMixer {
       }
       const pos = (f - anchor) / interval
       const beat = Math.floor(pos)
-      const continuous = !Number.isNaN(this.prevFrame) && f >= this.prevFrame
+      const advance = f - this.prevFrame
+      const continuous = advance >= 0 && advance <= maxAdvance
       // 앞으로 흐르다 박 경계를 넘었거나, 되감겨서(또는 처음으로) 박 바로 위에 떨어졌을 때
       const hit = continuous ? beat > this.prevBeat : (pos - beat) * interval < tolerance
       if (hit) {

@@ -596,14 +596,23 @@ async function main() {
   const clickBtn = (sel, shift = false) => cdp.eval(`document.querySelector('${sel}').dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: ${shift} }))`)
 
   const m0 = await metro()
-  check('메트로놈은 처음에 꺼져 있고 박 기준이 없다', !m0.on && m0.grid === null && /첫 박 찍기/.test(m0.hint ?? ''), m0.hint)
+  check('메트로놈은 처음에 꺼져 있고 박 기준이 없다', !m0.on && m0.grid === null && /박자 편집/.test(m0.hint ?? ''), m0.hint)
+
+  await key('t', 'KeyT', 84)
+  check('편집 모드 밖에서는 T로 첫 박을 찍을 수 없다', (await metro()).grid === null)
+  await clickBtn('.metro-edit')
 
   // 재생하며 T를 한 번 → 그 순간 위치가 1박, BPM은 기본 120
   await cdp.eval(`window.__dodori.usePlayer.getState().seek(0)`)
   await key(' ', 'Space', 32)
   await sleep(1200)
-  const posAtTap = await cdp.eval(`window.__dodori.engine.getPositionSec()`)
-  await key('t', 'KeyT', 84)
+  const posAtTap = await cdp.eval(`(() => {
+    // 헤드리스 탭에서 첫 조회가 아직 마지막 정지 위치를 반환할 수 있다.
+    window.__dodori.engine.getPositionSec()
+    const position = window.__dodori.engine.getPositionSec()
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 't', code: 'KeyT' }))
+    return position
+  })()`)
   await sleep(100)
   const m1 = await metro()
   check('T 한 번으로 지금 위치가 첫 박이 된다', m1.grid && Math.abs(m1.grid.anchorSec - posAtTap) < 0.1 && m1.grid.bpm === 120,
@@ -653,12 +662,21 @@ async function main() {
     return JSON.stringify({ x: r.left, y: r.top, w: r.width, h: r.height, vs: +el.dataset.viewStart, vspan: +el.dataset.viewSpan }); })()`))
   const lineX = mb.x + ((1.5 - mb.vs) / mb.vspan) * mb.w
   const selBefore = await cdp.eval(`JSON.stringify(window.__dodori.usePlayer.getState().selection)`)
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: lineX, y: mb.y + mb.h * 0.6, button: 'left', clickCount: 1, pointerType: 'mouse' })
-  for (let i = 1; i <= 8; i++) {
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: lineX + 5 * i, y: mb.y + mb.h * 0.6, button: 'left', pointerType: 'mouse' })
-    await sleep(20)
+  const dragBeat = async () => {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: lineX, y: mb.y + mb.h * 0.6, button: 'left', clickCount: 1, pointerType: 'mouse' })
+    for (let i = 1; i <= 8; i++) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: lineX + 5 * i, y: mb.y + mb.h * 0.6, button: 'left', pointerType: 'mouse' })
+      await sleep(20)
+    }
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: lineX + 40, y: mb.y + mb.h * 0.6, button: 'left', clickCount: 1, pointerType: 'mouse' })
   }
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: lineX + 40, y: mb.y + mb.h * 0.6, button: 'left', clickCount: 1, pointerType: 'mouse' })
+  await clickBtn('.metro-edit')
+  await dragBeat()
+  check('편집 모드 밖에서는 파형의 박자 선을 끌어도 첫 박이 고정된다', (await metro()).grid.anchorSec === 0.5)
+  check('편집 모드 밖에서는 BPM과 박자 입력이 잠긴다',
+    await cdp.eval(`document.querySelector('.metro-bpm input').disabled && document.querySelector('.metro-bar').disabled`))
+  await clickBtn('.metro-edit')
+  await dragBeat()
   await sleep(300)
   const m2 = await metro()
   const vAfter = await viewOf()
@@ -705,11 +723,27 @@ async function main() {
   await cdp.eval(`document.querySelector('.wave-fit')?.click()`)
   await sleep(200)
 
-  // 구간에 저장한 박 격자는 새로고침 후 그 구간을 고르면 돌아온다
-  await cdp.eval(`window.__dodori.usePlayer.getState().setSelection({ startSec: 5.2, endSec: 7.1 })`)
-  await sleep(100)
-  await cdp.eval(`window.__dodori.usePlayer.getState().setBeatGrid({ bpm: 96.5, anchorSec: 5.31, beatsPerBar: 3 })`)
-  await cdp.eval(`window.__dodori.usePlayer.getState().saveSelectionAsRegion('박자 구간')`)
+  // 기존 북마크에서 완료한 편집은 저장되고, 취소한 편집은 원래 값으로 돌아간다.
+  await cdp.eval(`(async () => {
+    const player = window.__dodori.usePlayer.getState;
+    player().setSelection({ startSec: 5.2, endSec: 7.1 });
+    player().setBeatEditing(false);
+    await player().saveSelectionAsRegion('박자 구간');
+    player().setBeatEditing(true);
+    player().setBeatGrid({ bpm: 96.5, anchorSec: 5.31, beatsPerBar: 3 });
+    player().setBeatEditing(false);
+    player().setBeatEditing(true);
+    player().setBeatGrid({ bpm: 130, anchorSec: 5.5, beatsPerBar: 6 });
+  })()`)
+  check('편집한 박자는 완료하기 전에도 미리 확인할 수 있다', (await metro()).grid.bpm === 130)
+  await cdp.eval(`[...document.querySelectorAll('.metro button')].find((button) => button.textContent === '편집 취소').click()`)
+  check('편집 취소를 누르면 이전 박자 설정으로 돌아간다',
+    (await metro()).grid.bpm === 96.5 &&
+    await cdp.eval(`document.querySelector('.metro-edit').getAttribute('aria-pressed')`) === 'false')
+  await clickBtn('.metro-edit')
+  await cdp.eval(`window.__dodori.usePlayer.getState().setBeatGrid(null)`)
+  await key('Escape', 'Escape', 27)
+  check('Esc도 박자 편집을 취소한다', (await metro()).grid?.bpm === 96.5)
   await sleep(500)
   await cdp.send('Page.navigate', { url: APP })
   await sleep(3000)
@@ -720,6 +754,7 @@ async function main() {
     m3.grid && m3.grid.bpm === 96.5 && Math.abs(m3.grid.anchorSec - 5.31) < 1e-6 && m3.grid.beatsPerBar === 3, JSON.stringify(m3.grid))
 
   // 자동 박 감지 — 클릭 트랙을 넣고 "자동"을 누르면 BPM · 첫 박이 채워지고 메트로놈이 켜진다
+  await clickBtn('.metro-edit')
   makeClickWav(CLICK_WAV)
   await cdp.eval(`window.__dodori.usePlayer.getState().setMetronomeOn(false)`)
   {
@@ -733,6 +768,9 @@ async function main() {
     clickLoaded = await cdp.eval(`(() => { const s = window.__dodori.usePlayer.getState(); return s.song?.title === 'click-103' && !!s.buffer })()`)
   }
   check('자동 감지용 클릭 트랙을 연다', clickLoaded)
+  check('곡을 바꾸면 박자 편집 모드가 꺼진다',
+    await cdp.eval(`document.querySelector('.metro-edit').getAttribute('aria-pressed')`) === 'false')
+  await clickBtn('.metro-edit')
   const autoBtn = `[...document.querySelectorAll('.metro .metro-mark')].find((b) => b.textContent.includes('자동'))`
   const t0 = Date.now()
   await cdp.eval(`${autoBtn}.click()`)

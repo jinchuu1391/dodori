@@ -30,6 +30,10 @@ function formatMs(sec: number): string {
 export function Metronome() {
   const buffer = usePlayer((s) => s.buffer)
   const grid = usePlayer((s) => s.beatGrid)
+  const editing = usePlayer((s) => s.beatEditing)
+  const setEditing = usePlayer((s) => s.setBeatEditing)
+  const cancelEditing = usePlayer((s) => s.cancelBeatEditing)
+  const canEditGrid = editing && grid !== null
   const on = usePlayer((s) => s.metronomeOn)
   const volume = usePlayer((s) => s.metronomeVolume)
   const speed = usePlayer((s) => s.speed)
@@ -43,10 +47,10 @@ export function Metronome() {
 
   // 입력 중에는 글자 그대로 두고, Enter·포커스 아웃 때 반영한다
   const [bpmText, setBpmText] = useState('')
-  useEffect(() => setBpmText(grid ? String(grid.bpm) : ''), [grid])
+  useEffect(() => setBpmText(grid ? String(grid.bpm) : ''), [grid, editing])
 
   const setBpm = (v: number) => {
-    if (!grid || !Number.isFinite(v)) return
+    if (!editing || !grid || !Number.isFinite(v)) return
     const bpm = Math.round(Math.min(BPM_MAX, Math.max(BPM_MIN, v)) * 10) / 10
     if (bpm !== grid.bpm) setGrid({ ...grid, bpm })
     else setBpmText(String(grid.bpm))
@@ -80,9 +84,30 @@ export function Metronome() {
 
       <button
         type="button"
+        className="metro-mark metro-edit"
+        aria-pressed={editing}
+        onKeyDown={(e) => { if (e.code === 'Space') e.stopPropagation() }}
+        onClick={() => setEditing(!editing)}
+        disabled={!buffer}
+      >
+        {editing ? '박자 편집 완료' : '박자 편집'}
+      </button>
+      {editing && (
+        <button
+          type="button"
+          className="metro-mark"
+          onKeyDown={(e) => { if (e.code === 'Space') e.stopPropagation() }}
+          onClick={cancelEditing}
+        >
+          편집 취소
+        </button>
+      )}
+
+      <button
+        type="button"
         className="metro-mark"
         onClick={() => void autoDetect()}
-        disabled={!buffer || detecting}
+        disabled={!editing || !buffer || detecting}
         title="고른 구간(없으면 곡 전체)에서 BPM과 첫 박을 자동으로 찾습니다"
       >
         {detecting ? '분석 중…' : '자동'}
@@ -92,7 +117,7 @@ export function Metronome() {
         type="button"
         className="metro-mark"
         onClick={markBeat}
-        disabled={!buffer}
+        disabled={!editing || !buffer}
         title="지금 위치를 1박으로 (단축키 T) — 재생하며 박이 오는 순간 누르세요"
       >
         첫 박 찍기
@@ -102,7 +127,7 @@ export function Metronome() {
         <button
           type="button"
           onClick={(e) => nudge(-1, e.shiftKey)}
-          disabled={!grid}
+          disabled={!canEditGrid}
           title="첫 박을 10ms 앞으로 (Shift: 1ms)"
           aria-label="첫 박 앞으로"
         >
@@ -112,7 +137,7 @@ export function Metronome() {
         <button
           type="button"
           onClick={(e) => nudge(1, e.shiftKey)}
-          disabled={!grid}
+          disabled={!canEditGrid}
           title="첫 박을 10ms 뒤로 (Shift: 1ms)"
           aria-label="첫 박 뒤로"
         >
@@ -122,7 +147,7 @@ export function Metronome() {
           type="button"
           className="metro-wide"
           onClick={shiftDownbeat}
-          disabled={!grid}
+          disabled={!canEditGrid}
           title="강박(1박)을 다음 박으로 옮깁니다"
         >
           강박 →
@@ -130,7 +155,7 @@ export function Metronome() {
       </span>
 
       <span className="metro-bpm">
-        <button type="button" onClick={() => grid && setBpm(grid.bpm - 1)} disabled={!grid} aria-label="BPM 1 내리기">
+        <button type="button" onClick={() => grid && setBpm(grid.bpm - 1)} disabled={!canEditGrid} aria-label="BPM 1 내리기">
           −
         </button>
         <input
@@ -146,10 +171,10 @@ export function Metronome() {
           onKeyDown={(e) => {
             if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
           }}
-          disabled={!grid}
+          disabled={!canEditGrid}
           aria-label="BPM"
         />
-        <button type="button" onClick={() => grid && setBpm(grid.bpm + 1)} disabled={!grid} aria-label="BPM 1 올리기">
+        <button type="button" onClick={() => grid && setBpm(grid.bpm + 1)} disabled={!canEditGrid} aria-label="BPM 1 올리기">
           +
         </button>
         <span className="unit">BPM</span>
@@ -157,7 +182,7 @@ export function Metronome() {
           type="button"
           className="metro-wide"
           onClick={() => scaleBpm(0.5)}
-          disabled={!grid || grid.bpm / 2 < BPM_MIN}
+          disabled={!canEditGrid || !grid || grid.bpm / 2 < BPM_MIN}
           title="빠르기를 절반으로"
         >
           ÷2
@@ -166,7 +191,7 @@ export function Metronome() {
           type="button"
           className="metro-wide"
           onClick={() => scaleBpm(2)}
-          disabled={!grid || grid.bpm * 2 > BPM_MAX}
+          disabled={!canEditGrid || !grid || grid.bpm * 2 > BPM_MAX}
           title="빠르기를 두 배로"
         >
           ×2
@@ -177,7 +202,7 @@ export function Metronome() {
         className="metro-bar"
         value={grid?.beatsPerBar ?? 4}
         onChange={(e) => grid && setGrid({ ...grid, beatsPerBar: Number(e.target.value) })}
-        disabled={!grid}
+        disabled={!canEditGrid}
         aria-label="한 마디 박 수"
       >
         {BEATS_PER_BAR.map((b) => (
@@ -201,13 +226,15 @@ export function Metronome() {
       </label>
 
       <span className="hint">
-        {!grid
-          ? '"자동"으로 찾거나, 재생하며 박이 오는 순간 "첫 박 찍기"(T)를 누르세요'
-          : confidence !== null && confidence < LOW_CONFIDENCE
-            ? '자동 감지 결과가 불확실해요. 들어 보고 BPM·첫 박을 고쳐 주세요'
-            : on && speed < ACCURATE_SPEED_MIN
-            ? '느린 속도에서는 클릭이 음악과 조금 어긋날 수 있어요'
-            : 'BPM을 맞춘 뒤, 첫 박은 ◀ ▶ 나 파형의 박자 선을 끌어 맞추세요'}
+        {!editing
+          ? 'BPM이나 첫 박을 바꾸려면 박자 편집을 켜세요'
+          : !grid
+            ? '"자동"으로 찾거나, 재생하며 박이 오는 순간 "첫 박 찍기"(T)를 누르세요'
+            : confidence !== null && confidence < LOW_CONFIDENCE
+              ? '자동 감지 결과가 불확실해요. 들어 보고 BPM·첫 박을 고쳐 주세요'
+              : on && speed < ACCURATE_SPEED_MIN
+                ? '느린 속도에서는 클릭이 음악과 조금 어긋날 수 있어요'
+                : 'BPM을 맞춘 뒤, 첫 박은 ◀ ▶ 나 파형의 박자 선을 끌어 맞추세요'}
       </span>
     </div>
   )

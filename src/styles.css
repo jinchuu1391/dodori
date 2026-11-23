@@ -719,6 +719,10 @@ h3 {
 .metro-mark:hover:not(:disabled) {
   background: var(--accent-weak);
 }
+.metro-edit[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+}
 .metro-vol {
   display: flex;
   align-items: center;

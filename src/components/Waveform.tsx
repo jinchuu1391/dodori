@@ -85,6 +85,7 @@ export function Waveform() {
   const levels = usePlayer((s) => s.levels)
   const regions = usePlayer((s) => s.regions)
   const grid = usePlayer((s) => s.beatGrid)
+  const beatEditing = usePlayer((s) => s.beatEditing)
   const setBeatGrid = usePlayer((s) => s.setBeatGrid)
   const selection = usePlayer((s) => s.selection)
   const loopRegionIds = usePlayer((s) => s.loopRegionIds)
@@ -101,6 +102,7 @@ export function Waveform() {
   const [size, setSize] = useState({ w: 0, h: 0 })
   const [hoverSec, setHoverSec] = useState<number | null>(null)
   const [cursor, setCursor] = useState('default')
+  useEffect(() => setCursor('default'), [beatEditing])
   /** 지난 프레임에 재생 헤드가 화면 안에 있었나 — 화면 따라가기 판단용 */
   const headWasInViewRef = useRef(true)
 
@@ -426,7 +428,7 @@ export function Waveform() {
 
   /** x 근처의 잡을 수 있는 박자 선 번호. 선이 너무 촘촘하면(확대가 덜 됐으면) 잡지 않는다 */
   const beatAt = (x: number, width: number): number | null => {
-    if (!grid || grid.bpm <= 0) return null
+    if (!beatEditing || !grid || grid.bpm <= 0) return null
     const period = 60 / grid.bpm
     if ((period / view.span) * width < BEAT_GRAB_MIN_PX) return null
     const sec = view.start + (x / width) * view.span
@@ -486,6 +488,7 @@ export function Waveform() {
 
     const sec = secFromClientX(e.clientX)
     if (drag.mode === 'beat' && drag.grid) {
+      if (!beatEditing) return
       // 잡은 박이 손을 따라오게 격자 전체를 옮긴다. 소리(클릭)도 바로 따라오고, 저장은 놓을 때
       const g = drag.grid
       setBeatGrid({ ...g, anchorSec: sec - (drag.beatIndex ?? 0) * (60 / g.bpm) }, false)
@@ -509,6 +512,11 @@ export function Waveform() {
     dragRef.current = null
     wrapRef.current?.releasePointerCapture(e.pointerId)
     if (!drag) return
+    if (drag.mode === 'beat' && (e.type === 'pointercancel' || !beatEditing)) {
+      usePlayer.getState().cancelBeatDrag()
+      setCursor('default')
+      return
+    }
     setCursor(cursorFor(drag.mode, false))
     if (!drag.moved) {
       // 끌지 않았으면 클릭 = 이동(눈금이든 파형이든). 기존 선택은 그대로 둔다
@@ -545,7 +553,9 @@ export function Waveform() {
       onPointerLeave={() => setHoverSec(null)}
       style={{ cursor }}
       role="slider"
-      aria-label="파형 — 위쪽 눈금을 드래그해 A-B 구간 선택, 파형 드래그로 좌우 이동, 박자 선 드래그로 첫 박 맞추기, 휠로 확대/축소"
+      aria-label={beatEditing
+        ? '파형 — 박자 선을 드래그해 첫 박 맞추기'
+        : '파형 — 위쪽 눈금을 드래그해 A-B 구간 선택, 파형 드래그로 좌우 이동, 휠로 확대/축소'}
       aria-valuemin={0}
       aria-valuemax={duration}
       aria-valuenow={selection?.startSec ?? 0}

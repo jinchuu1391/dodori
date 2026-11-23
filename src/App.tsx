@@ -23,6 +23,11 @@ export default function App() {
   // 단축키 — 연습 중에 마우스를 옮기지 않으려고
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && usePlayer.getState().beatEditing) {
+        e.preventDefault()
+        usePlayer.getState().cancelBeatEditing()
+        return
+      }
       const t = e.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
       if (e.code === 'Space') {

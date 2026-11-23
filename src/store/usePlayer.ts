@@ -67,11 +67,15 @@ interface PlayerState {
 
   /** 지금 쓰는 박자 격자. 구간을 고르면 그 구간 것으로, 새 구간은 이걸 물려받는다 */
   beatGrid: BeatGrid | null
+  beatEditing: boolean
+  setBeatEditing: (on: boolean) => void
+  cancelBeatEditing: () => void
+  cancelBeatDrag: () => void
   metronomeOn: boolean
   metronomeVolume: number
   /**
-   * commit=false면 화면·소리만 바꾸고 저장하지 않는다(박자 선 드래그 중).
-   * 고른 북마크가 있으면 그 구간에 저장한다.
+   * 편집 중에는 화면과 소리에만 반영한다. 편집을 완료하면 북마크에 저장한다.
+   * commit=false는 드래그가 취소될 때 되돌릴 수 있도록 드래그 시작값을 남긴다.
    */
   setBeatGrid: (grid: BeatGrid | null, commit?: boolean) => void
   setMetronomeOn: (on: boolean) => void
@@ -90,6 +94,10 @@ interface PlayerState {
 }
 
 export const usePlayer = create<PlayerState>()((set, get) => {
+  let beatEditSession = 0
+  let beatGridBeforeDrag: BeatGrid | null | undefined
+  let beatEditStart: Pick<PlayerState, 'beatGrid' | 'beatConfidence' | 'metronomeOn'> | undefined
+
   /** 선택 구간 + 루프 스위치를 엔진에 반영 */
   const syncLoop = () => {
     const { selection, loopEnabled, loopRegionIds, regions } = get()
@@ -104,6 +112,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
   }
 
   const selectRegion = (region: Region, loopRegionIds: string[]) => {
+    get().cancelBeatEditing()
     set({
       selection: { startSec: region.startSec, endSec: region.endSec },
       activeRegionId: region.id,
@@ -132,6 +141,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     pitchSemitones: 0,
     volume: 1,
     beatGrid: null,
+    beatEditing: false,
     metronomeOn: false,
     metronomeVolume: 0.8,
     beatDetecting: false,
@@ -204,6 +214,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       }
 
       engine.pause()
+      get().cancelBeatEditing()
       set({
         status: '불러오는 중…', error: null, isPlaying: false, selection: null, activeRegionId: null,
         loopRegionIds: [], beatGrid: null, beatConfidence: null,
@@ -232,6 +243,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     async removeSong(id) {
       await repo.deleteSong(id)
       if (get().song?.id === id) {
+        get().cancelBeatEditing()
         engine.unload()
         localStorage.removeItem(LAST_SONG_KEY)
         set({
@@ -248,12 +260,14 @@ export const usePlayer = create<PlayerState>()((set, get) => {
      * SimpleFilter가 매번 clear()되어 소리가 튄다. 손을 뗄 때 한 번만 반영한다.
      */
     setSelection(sel, commit = true) {
+      if (get().activeRegionId) get().cancelBeatEditing()
       set({ selection: sel, activeRegionId: null, loopRegionIds: [] })
       if (commit) syncLoop()
     },
 
     async saveSelectionAsRegion(label) {
       const { song, selection, beatGrid } = get()
+      const savedGrid = beatEditStart ? beatEditStart.beatGrid : beatGrid
       const title = label.trim()
       if (!song || !selection || !title) return
       const region = await repo.addRegion({
@@ -261,7 +275,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
         label: title,
         startSec: selection.startSec,
         endSec: selection.endSec,
-        ...(beatGrid ? { beatGrid } : {}),
+        ...(savedGrid ? { beatGrid: savedGrid } : {}),
       })
       const regions = await repo.listRegions(song.id)
       set((state) => state.song?.id === song.id ? {
@@ -313,7 +327,10 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       if (state.activeRegionId === id) {
         const next = regions.find((region) => region.id === remaining[0])
         if (next) selectRegion(next, remaining)
-        else set({ activeRegionId: null })
+        else {
+          get().cancelBeatEditing()
+          set({ activeRegionId: null })
+        }
       }
       if (included) syncLoop()
     },
@@ -339,18 +356,65 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       set({ speed })
     },
 
+    setBeatEditing(on) {
+      const { beatEditing, buffer, beatGrid, beatConfidence, metronomeOn, activeRegionId } = get()
+      if (on === beatEditing || (on && !buffer)) return
+      beatEditSession++
+      if (on) {
+        beatEditStart = { beatGrid, beatConfidence, metronomeOn }
+        set({ beatEditing: true })
+        return
+      }
+
+      get().cancelBeatDrag()
+      const grid = get().beatGrid
+      const changed = grid !== beatEditStart?.beatGrid
+      beatEditStart = undefined
+      set({ beatEditing: false })
+      if (!changed || !activeRegionId) return
+
+      const storedGrid = grid ?? undefined
+      const previousGrid = get().regions.find((region) => region.id === activeRegionId)?.beatGrid
+      set((state) => ({
+        regions: state.regions.map((region) => region.id === activeRegionId ? { ...region, beatGrid: storedGrid } : region),
+      }))
+      void repo.updateRegion(activeRegionId, { beatGrid: storedGrid }).catch(() => {
+        set((state) => ({
+          error: '박자 설정을 저장하지 못했습니다.',
+          regions: state.regions.map((region) =>
+            region.id === activeRegionId && region.beatGrid === storedGrid ? { ...region, beatGrid: previousGrid } : region),
+        }))
+      })
+    },
+
+    cancelBeatEditing() {
+      if (!beatEditStart) return
+      const original = beatEditStart
+      beatEditSession++
+      beatEditStart = undefined
+      beatGridBeforeDrag = undefined
+      set({ ...original, beatEditing: false })
+      syncMetronome()
+    },
+
+    cancelBeatDrag() {
+      if (beatGridBeforeDrag === undefined) return
+      const beatGrid = beatGridBeforeDrag
+      beatGridBeforeDrag = undefined
+      set({ beatGrid })
+      syncMetronome()
+    },
+
     setBeatGrid(grid, commit = true) {
+      if (!get().beatEditing) return
+      if (commit) beatGridBeforeDrag = undefined
+      else if (beatGridBeforeDrag === undefined) beatGridBeforeDrag = get().beatGrid
       set({ beatGrid: grid })
       syncMetronome()
-      if (!commit) return
-      const { activeRegionId, song } = get()
-      if (!activeRegionId || !song) return
-      // 고른 북마크의 격자를 고친 것 — 그 구간에 저장(화면 목록도 바로 반영)
-      set({ regions: get().regions.map((r) => (r.id === activeRegionId ? { ...r, beatGrid: grid ?? undefined } : r)) })
-      void repo.updateRegion(activeRegionId, { beatGrid: grid ?? undefined })
     },
 
     setMetronomeOn(on) {
+      if (beatEditStart) beatEditStart.metronomeOn = on
       set({ metronomeOn: on })
       syncMetronome()
     },
@@ -362,7 +426,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     },
 
     markBeat() {
-      if (!engine.isLoaded) return
+      if (!get().beatEditing || !engine.isLoaded) return
       const g = get().beatGrid
       set({ beatConfidence: null })
       get().setBeatGrid({
@@ -373,25 +437,26 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     },
 
     async autoDetectBeat() {
-      const { buffer, song, selection, beatDetecting } = get()
-      if (!buffer || !song || beatDetecting) return
+      const { buffer, song, selection, beatDetecting, beatEditing } = get()
+      if (!buffer || !song || beatDetecting || !beatEditing) return
+      const session = beatEditSession
+      const isCurrent = () => beatEditSession === session && get().song?.id === song.id && get().selection === selection
       const startSec = selection?.startSec ?? 0
       const endSec = selection?.endSec ?? buffer.duration
       set({ beatDetecting: true, status: '박 분석 중…', error: null })
       try {
         const found = await detectBeatGrid(buffer, startSec, endSec)
-        if (get().song?.id !== song.id) return // 분석하는 사이 곡을 바꿨다
+        if (!isCurrent()) return
         if (!found) {
           set({ error: '박을 찾지 못했어요. "첫 박 찍기"로 직접 잡아 주세요.' })
           return
         }
         const bpm = clamp(found.bpm, BPM_MIN, BPM_MAX)
-        set({ beatConfidence: found.confidence })
+        set({ beatConfidence: found.confidence, metronomeOn: true })
         get().setBeatGrid({ bpm, anchorSec: found.anchorSec, beatsPerBar: get().beatGrid?.beatsPerBar ?? 4 })
-        get().setMetronomeOn(true)
       } catch (err) {
         console.error(err)
-        if (get().song?.id === song.id) set({ error: '박 분석에 실패했어요.' })
+        if (isCurrent()) set({ error: '박 분석에 실패했어요.' })
       } finally {
         set({ beatDetecting: false })
         if (get().status === '박 분석 중…') set({ status: null })
